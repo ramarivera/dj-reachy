@@ -89,15 +89,24 @@ def run(
         #   2. Reachy Mini daemon running on localhost (same device)
         #   3. Reachy Mini daemon on local network (same subnet)
 
-        if args.wireless_version and not args.on_device:
+        # Determine media backend based on args
+        if args.no_camera:
+            media_backend = "no_media"
+            logger.info("Using no_media backend (camera disabled)")
+        elif args.wireless_version and not args.on_device:
+            media_backend = "webrtc"
             logger.info("Using WebRTC backend for fully remote wireless version")
-            robot = ReachyMini(media_backend="webrtc", localhost_only=False)
         elif args.wireless_version and args.on_device:
+            media_backend = "gstreamer"
             logger.info("Using GStreamer backend for on-device wireless version")
-            robot = ReachyMini(media_backend="gstreamer")
         else:
+            media_backend = "default"
             logger.info("Using default backend for lite version")
-            robot = ReachyMini(media_backend="default")
+
+        robot = ReachyMini(
+            media_backend=media_backend,
+            localhost_only=not (args.wireless_version and not args.on_device),
+        )
 
     # Check if running in simulation mode without --gradio
     if robot.client.get_status()["simulation_enabled"] and not args.gradio:
