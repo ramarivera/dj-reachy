@@ -152,24 +152,26 @@ def run(
     stream_manager: gr.Blocks | LocalStream | None = None
 
     if args.gradio:
+        from dj_reachy.gradio_theme import create_dj_reachy_theme, DJ_REACHY_CSS
+        from dj_reachy.gradio_dj_ui import DJReachyUI
+
+        # Create custom theme
+        dj_theme = create_dj_reachy_theme()
+
         openai_key_textbox = gr.Textbox(
-            label="OpenAI API Key",
+            label="🔑 OpenAI API Key",
             type="password",
             placeholder="sk-...",
             value=os.getenv("OPENAI_API_KEY") if not get_space() else "",
         )
         elevenlabs_key_textbox = gr.Textbox(
-            label="ElevenLabs API Key (for music generation)",
+            label="🎵 ElevenLabs API Key (for music generation)",
             type="password",
-            placeholder="Optional - for make_song_and_dance tool",
+            placeholder="Required for make_song_and_dance",
             value=os.getenv("ELEVENLABS_API_KEY") if not get_space() else "",
         )
 
-        from dj_reachy.gradio_personality import PersonalityUI
-
-        personality_ui = PersonalityUI()
-        personality_ui.create_components()
-
+        # Create the Stream first (this creates the base UI)
         stream = Stream(
             handler=handler,
             mode="send-receive",
@@ -178,19 +180,58 @@ def run(
                 chatbot,
                 openai_key_textbox,
                 elevenlabs_key_textbox,
-                *personality_ui.additional_inputs_ordered(),
             ],
             additional_outputs=[chatbot],
             additional_outputs_handler=update_chatbot,
-            ui_args={"title": "Talk with Reachy Mini"},
+            ui_args={
+                "title": "🎧 DJ Reachy",
+                "theme": dj_theme,
+                "css": DJ_REACHY_CSS,
+            },
         )
         stream_manager = stream.ui
+
+        # Now add DJ UI components inside the Stream's Blocks context
+        dj_ui = DJReachyUI()
+        with stream_manager:
+            with gr.Accordion("🎵 Song Library & Dance Settings", open=True):
+                with gr.Row():
+                    with gr.Column(scale=2):
+                        dj_ui.songs_list = gr.Dataframe(
+                            headers=["Filename", "Title", "Size"],
+                            datatype=["str", "str", "str"],
+                            value=dj_ui._list_songs(),
+                            label="🎵 Song Library",
+                            interactive=False,
+                            wrap=True,
+                        )
+                        with gr.Row():
+                            dj_ui.refresh_btn = gr.Button("🔄 Refresh", variant="secondary", size="sm")
+                    with gr.Column(scale=1):
+                        dj_ui.dance_intensity = gr.Slider(
+                            label="🎚️ Dance Intensity",
+                            minimum=0,
+                            maximum=100,
+                            value=dj_ui._get_dance_intensity(),
+                            step=1,
+                            info="Control dance movement intensity",
+                        )
+                        dj_ui.status_md = gr.Markdown(value="", visible=True)
+                        dj_ui.song_audio = gr.Audio(
+                            label="🔊 Now Playing",
+                            type="filepath",
+                            interactive=False,
+                            visible=True,
+                            autoplay=True,
+                        )
+
+        # Wire DJ UI events
+        dj_ui.wire_events(handler, stream_manager)
+
         if not settings_app:
             app = FastAPI()
         else:
             app = settings_app
-
-        personality_ui.wire_events(handler, stream_manager)
 
         app = gr.mount_gradio_app(app, stream.ui, path="/")
     else:

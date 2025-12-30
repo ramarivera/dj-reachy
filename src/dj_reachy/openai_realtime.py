@@ -174,9 +174,28 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
             await self.wait_for_args()  # type: ignore[no-untyped-call]
             args = list(self.latest_args)
             
-            # args[3] = OpenAI key textbox, args[4] = ElevenLabs key textbox
-            textbox_openai_key = args[3] if len(args) > 3 and args[3] and len(args[3]) > 0 else None
-            textbox_elevenlabs_key = args[4] if len(args) > 4 and args[4] and len(args[4]) > 0 else None
+            # Debug: log args structure
+            logger.info(f"Gradio args count: {len(args)}")
+            for i, arg in enumerate(args):
+                if isinstance(arg, str) and len(arg) > 20:
+                    # Truncate long strings (like API keys) for privacy
+                    logger.info(f"  args[{i}]: {type(arg).__name__} = '{arg[:10]}...{arg[-4:]}' (len={len(arg)})")
+                else:
+                    logger.info(f"  args[{i}]: {type(arg).__name__} = {repr(arg)[:50]}")
+            
+            # Gradio prepends internal values, so actual additional_inputs start at index 2:
+            # args[0] = '__webrtc_value__' (internal)
+            # args[1] = session ID (internal)
+            # args[2] = chatbot (list)
+            # args[3] = OpenAI key textbox
+            # args[4] = ElevenLabs key textbox
+            # args[5] = dance_intensity (int)
+            textbox_openai_key = args[3] if len(args) > 3 and isinstance(args[3], str) and len(args[3]) > 0 else None
+            textbox_elevenlabs_key = args[4] if len(args) > 4 and isinstance(args[4], str) and len(args[4]) > 0 else None
+            
+            logger.info(f"Extracted textbox_openai_key: {'present' if textbox_openai_key else 'None'}")
+            logger.info(f"Extracted textbox_elevenlabs_key: {'present' if textbox_elevenlabs_key else 'None'}")
+            logger.info(f"Config openai_api_key: {'present' if openai_api_key else 'None'}")
             
             if textbox_openai_key:
                 openai_api_key = textbox_openai_key
@@ -186,6 +205,8 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
             if textbox_elevenlabs_key:
                 self._provided_elevenlabs_key = textbox_elevenlabs_key
                 elevenlabs_api_key = textbox_elevenlabs_key
+            
+            logger.info(f"Final openai_api_key: {'present (' + self._key_source + ')' if openai_api_key else 'MISSING'}")
             
             # Update config with keys from UI
             set_api_keys(openai_api_key, elevenlabs_api_key)
