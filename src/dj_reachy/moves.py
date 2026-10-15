@@ -371,12 +371,13 @@ class MovementManager:
     ) -> None:
         """Update music-reactive dance offsets for full body movement.
 
+        Thread-safe via a pending snapshot.
+
         Args:
             head_offsets: (x, y, z, roll, pitch, yaw) in metres/radians (world frame)
             antennas: (left, right) antenna positions in radians
             body_yaw: Body yaw offset in radians
 
-        Thread-safe via a pending snapshot.
         """
         with self._music_dance_lock:
             self._pending_music_dance_head = head_offsets

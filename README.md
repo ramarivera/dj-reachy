@@ -5,169 +5,72 @@ colorFrom: red
 colorTo: blue
 sdk: static
 pinned: false
-short_description: Request a song and watch DJ Reachy write, play & dance!
+short_description: Generate music and dance with Reachy Mini
 tags:
   - reachy_mini
   - reachy_mini_python_app
 ---
 
-<div align="center">
+# DJ Reachy
 
-# 🎧 DJ Reachy
+A standalone derivative of [mzurki/dj-reachy](https://huggingface.co/spaces/mzurki/dj-reachy). It preserves the upstream Apache 2.0 history, `dj-reachy` CLI, `dj_reachy` app-manager ID and local audio-reactive dance engine.
 
-**Your personal robot DJ that creates songs and dances to them**
+The control panel separates conversation and personality, Eleven Music generation, and bounded local motion. Saved tracks can be listed, previewed, replayed without regeneration, and deleted. Pause, resume and stop use the same music tools as the voice handler.
 
-![Reachy Mini Dance](docs/assets/reachy_mini_dance.gif)
+## Install and configure
 
-*Tell DJ Reachy what kind of song you want, and watch as it generates music and grooves along!*
+Python 3.10 or later and the Reachy Mini SDK are required. Music playback also requires the decoder used by the music implementation. From this checkout, install into your own environment with `pip install -e .`, or install the wheel built by your integration owner. Don't install into a shared development environment.
 
-</div>
+Configure without connecting to a robot, recording a microphone, or contacting a provider:
 
----
-
-## What is DJ Reachy?
-
-DJ Reachy transforms your [Reachy Mini](https://github.com/pollen-robotics/reachy_mini/) robot into an interactive music-making companion. Just talk to it, request a song, and DJ Reachy will:
-
-1. 🎤 **Listen** to your song request through real-time voice conversation
-2. 🎵 **Generate** a unique song using AI music generation  
-3. 💃 **Dance** with audio-reactive movements synchronized to the beat
-
-Powered by OpenAI's realtime API for natural conversation and ElevenLabs for music generation.
-
----
-
-## Quick Start
-
-### Prerequisites
-
-- [Reachy Mini SDK](https://github.com/pollen-robotics/reachy_mini/) installed and daemon running
-- Python 3.10+
-- OpenAI API key
-- ElevenLabs API key (for music generation)
-
-### Installation
-
-```bash
-# Clone and setup
-git clone <repo-url>
-cd reachy_mini_conversation_app
-
-# Create virtual environment
-uv venv --python 3.12.1
-source .venv/bin/activate
-uv sync
-
-# Or with pip
-python -m venv .venv
-source .venv/bin/activate
-pip install -e .
+```nu
+dj-reachy --settings-only
 ```
 
-### Run
+Open <http://127.0.0.1:7860/>. The default voice backend is ChatGPT subscription Live. Missing subscription configuration never selects API-key billing. Subscription access and the consumer Live endpoint's account entitlement require a separate authorized qualification check. UI construction or a configured key doesn't prove access.
 
-```bash
-dj-reachy --gradio
+To explicitly select OpenAI API-key Realtime and reset the subscription model/voice defaults:
+
+```nu
+dj-reachy --settings-only --voice-backend api_key
 ```
 
-Open http://127.0.0.1:7860 and start talking! Enter your API keys in the web UI when prompted.
+Save the OpenAI key under Provider credentials. Save an ElevenLabs key there for music generation. Keys aren't returned by the settings API or embedded in the Gradio config. They are separate from the nonsecret JSON settings.
 
----
+## Run with an authorized robot
 
-## How It Works
+These commands connect to the robot and may record audio, play speakers and start motion services. Run them only when those actions are authorized.
 
-```
-┌─────────────┐      ┌──────────────────┐      ┌─────────────┐
-│     You     │◄────►│   DJ Reachy App  │◄────►│ Reachy Mini │
-│  (Browser)  │      │                  │      │   Robot     │
-└─────────────┘      └──────────────────┘      └─────────────┘
-                              │
-                    ┌─────────┴─────────┐
-                    ▼                   ▼
-            ┌──────────────┐   ┌──────────────┐
-            │   OpenAI     │   │  ElevenLabs  │
-            │ Realtime API │   │    Music     │
-            └──────────────┘   └──────────────┘
-```
-
-- **OpenAI Realtime API** handles voice conversation with low-latency streaming via [fastrtc](https://github.com/freddyaboulton/fastrtc)
-- **ElevenLabs** generates unique songs from your text prompts
-- **Audio-reactive dancing** analyzes the music in real-time to generate synchronized robot movements
-- **Gradio** provides the web interface
-
----
-
-## CLI Options
-
-| Option | Description |
-|--------|-------------|
-| `--gradio` | Launch web UI (required for simulation mode) |
-| `--head-tracker {yolo,mediapipe}` | Enable face-tracking |
-| `--no-camera` | Run without camera |
-| `--wireless-version` | Use GStreamer backend for wireless Reachy Mini |
-| `--debug` | Verbose logging |
-
-### Examples
-
-```bash
-# Standard usage with web UI
+```nu
+# Browser microphone and Gradio conversation at /voice; controls remain at /
 dj-reachy --gradio
 
-# With face tracking
-dj-reachy --gradio --head-tracker mediapipe
-
-# Audio-only (no camera)
-dj-reachy --gradio --no-camera
-
-# For wireless Reachy Mini
-dj-reachy --gradio --wireless-version
+# Headless robot microphone/speaker loop; controls at /
+dj-reachy
 ```
 
----
+The app-manager entry point uses the SDK's existing settings server. The standalone CLI starts its own loopback server. `--gradio` exposes the same shared control panel inside the voice page, not a second music executor. Stop remains usable while a long generation/replay HTTP request is running.
 
-## Optional Dependencies
+Conversation model, voice, language and user instructions apply on the next voice connection. Disconnect and reconnect browser voice after saving. In headless mode, restart the app to reconnect. Music defaults apply to subsequent generation requests. Motion settings update an already-created local dancer as well as future playback.
 
-Install extras based on your setup:
+See [configuration and API usage](docs/configuration.md) for storage paths, versioned plan editing, billing selection and local endpoint examples.
 
-```bash
-# Wireless Reachy Mini support
-uv sync --extra reachy_mini_wireless
+## Verification boundaries
 
-# Face tracking options
-uv sync --extra yolo_vision      # YOLOv8 tracking
-uv sync --extra mediapipe_vision # MediaPipe tracking
+This UI implementation has isolated HTTP, real SDK status-model and app-construction regression tests. The settings-only CLI and responsive browser controls can be exercised without hardware or credentials. No live provider handshake, paid generation, microphone recording, speaker playback, robot launch or physical motion was performed by this lane. The parent integration owner must qualify the combined voice/music implementation and built wheel separately.
 
-# Local vision processing (SmolVLM2)
-uv sync --extra local_vision
-
-# Development tools
-uv sync --group dev
-```
-
-| Extra | Purpose |
-|-------|---------|
-| `reachy_mini_wireless` | GStreamer support for wireless robots |
-| `yolo_vision` | YOLOv8-based face tracking |
-| `mediapipe_vision` | Lightweight MediaPipe tracking |
-| `local_vision` | On-device vision with SmolVLM2 |
-
----
+The subscription and music modules have independent protocol and entitlement requirements. A local cancellation doesn't prove that the provider canceled generation or refunded credits. `finetune_id` is an optional account-qualified Music control, not a TTS voice ID or a guarantee of persistent Vocals access. Unsupported implementations reject it before generation.
 
 ## Development
 
-```bash
-# Install dev dependencies
-uv sync --group dev
+Run tests in an isolated app home with no real credentials. Set `PYTHONPATH` to this checkout's `src`, and put HOME, TMPDIR, XDG roots, HF_HOME, package caches and all outputs under an owned scratch directory. Set `HF_HUB_OFFLINE=1` and `GRADIO_ANALYTICS_ENABLED=False`. Never run the suite against your normal OAuth/key files.
 
-# Run linter
-ruff check .
-
-# Run tests
-pytest
+```nu
+pytest -q
+ruff check src/dj_reachy/runtime_settings.py src/dj_reachy/config.py src/dj_reachy/gradio_dj_ui.py src/dj_reachy/console.py src/dj_reachy/main.py src/dj_reachy/prompts.py
+mypy src/dj_reachy/runtime_settings.py src/dj_reachy/config.py src/dj_reachy/gradio_dj_ui.py src/dj_reachy/console.py src/dj_reachy/main.py src/dj_reachy/prompts.py
 ```
-
----
 
 ## License
 
-Apache 2.0
+[Apache 2.0](LICENSE). Original DJ Reachy app by Max Zurkinden. Preserve the existing source attribution and any third-party notices when distributing the integrated fork.

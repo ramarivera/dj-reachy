@@ -3,6 +3,7 @@
 from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
+from typing import NoReturn
 from unittest.mock import MagicMock
 
 import pytest
@@ -12,12 +13,12 @@ from dj_reachy.openai_realtime import OpenaiRealtimeHandler
 from dj_reachy.tools.core_tools import ToolDependencies
 
 
-def handler():
+def handler() -> OpenaiRealtimeHandler:
     """Construct the real handler with hardware actions intercepted at injected dependencies."""
     return OpenaiRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
 
 
-def delegation(identity, transcript, turn):
+def delegation(identity: str, transcript: str, turn: int) -> SimpleNamespace:
     """Encode the pinned consumer event, which carries no task text in metadata."""
     return SimpleNamespace(
         type="delegation.created",
@@ -28,18 +29,18 @@ def delegation(identity, transcript, turn):
 
 
 @pytest.mark.asyncio
-async def test_general_delegation_uses_planner_and_correlates_tool_round(monkeypatch):
+async def test_general_delegation_uses_planner_and_correlates_tool_round(monkeypatch: pytest.MonkeyPatch) -> None:
     """A natural singing request must reach app execution, not a regex rejection."""
     app = handler()
     commands = []
     contexts = []
     rounds = []
 
-    async def dispatch(name, args, deps):
+    async def dispatch(name: str, args: str, deps: ToolDependencies) -> dict[str, str]:
         commands.append((name, args))
         return {"status": "completed", "filename": "salsa.mp3"}
 
-    async def plan(transcript, history):
+    async def plan(transcript: str, history: list[dict[str, object]]) -> dict[str, object]:
         rounds.append((transcript, list(history)))
         if not history:
             call = {
@@ -61,10 +62,10 @@ async def test_general_delegation_uses_planner_and_correlates_tool_round(monkeyp
             }
         return {"calls": [], "output": [], "text": "The salsa finished."}
 
-    async def context(text, channel, identity=None):
+    async def context(text: str, channel: str, identity: str | None = None) -> None:
         contexts.append((text, channel, identity))
 
-    async def close():
+    async def close() -> None:
         pass
 
     monkeypatch.setattr(realtime, "dispatch_tool_call", dispatch)
@@ -84,7 +85,9 @@ async def test_general_delegation_uses_planner_and_correlates_tool_round(monkeyp
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("blocked_at", ["planner", "song"])
-async def test_turn_controls_preempt_work_and_reject_stale_results(monkeypatch, blocked_at):
+async def test_turn_controls_preempt_work_and_reject_stale_results(
+    monkeypatch: pytest.MonkeyPatch, blocked_at: str
+) -> None:
     """Receiver handles pause/resume/stop in order while planning or song work is suspended."""
     from dj_reachy.subscription_voice import SubscriptionRealtimeAdapter
 
@@ -98,7 +101,7 @@ async def test_turn_controls_preempt_work_and_reject_stale_results(monkeypatch, 
     contexts = []
     cancellation_seen = []
 
-    async def wait_for_release():
+    async def wait_for_release() -> None:
         blocked.set()
         try:
             await released.wait()
@@ -107,7 +110,7 @@ async def test_turn_controls_preempt_work_and_reject_stale_results(monkeypatch, 
             # Simulate a late result from work that couldn't be interrupted upstream.
             await released.wait()
 
-    async def plan(transcript, history):
+    async def plan(transcript: str, history: list[dict[str, object]]) -> dict[str, object]:
         if blocked_at == "planner":
             await wait_for_release()
         return {
@@ -117,7 +120,7 @@ async def test_turn_controls_preempt_work_and_reject_stale_results(monkeypatch, 
             ],
         }
 
-    async def dispatch(name, args, deps):
+    async def dispatch(name: str, args: str, deps: ToolDependencies) -> dict[str, str]:
         commands.append(name)
         if name == "make_song_and_dance":
             await wait_for_release()
@@ -125,14 +128,14 @@ async def test_turn_controls_preempt_work_and_reject_stale_results(monkeypatch, 
             stopped.set()
         return {"status": "stopped" if name == "stop_music" else "completed"}
 
-    async def context(text, channel, identity=None):
+    async def context(text: str, channel: str, identity: str | None = None) -> None:
         contexts.append((text, channel, identity))
 
     monkeypatch.setattr(realtime, "dispatch_tool_call", dispatch)
-    connection.plan = plan
-    connection.send_context = context
+    monkeypatch.setattr(connection, "plan", plan)
+    monkeypatch.setattr(connection, "send_context", context)
 
-    async def event(value):
+    async def event(value: dict[str, object]) -> None:
         connection._events.put_nowait(SimpleNamespace(**value))
         await app._handle_event(await connection.__anext__())
         await asyncio.sleep(0)
@@ -170,7 +173,7 @@ async def test_turn_controls_preempt_work_and_reject_stale_results(monkeypatch, 
 
 
 @pytest.mark.asyncio
-async def test_shutdown_owns_in_progress_webrtc_handshake(monkeypatch):
+async def test_shutdown_owns_in_progress_webrtc_handshake(monkeypatch: pytest.MonkeyPatch) -> None:
     """Shutdown must cancel setup even before __aenter__ publishes the connection."""
     from dj_reachy.config import config
     from dj_reachy.subscription_voice import SubscriptionRealtimeAdapter
@@ -178,9 +181,10 @@ async def test_shutdown_owns_in_progress_webrtc_handshake(monkeypatch):
     entered = asyncio.Event()
     forever = asyncio.Event()
 
-    async def signal(body):
+    async def signal(body: dict[str, object]) -> NoReturn:
         entered.set()
         await forever.wait()
+        raise AssertionError("The blocked handshake must be cancelled")
 
     app = handler()
     adapter = SubscriptionRealtimeAdapter(signal=signal)
@@ -194,6 +198,7 @@ async def test_shutdown_owns_in_progress_webrtc_handshake(monkeypatch):
         await asyncio.wait_for(app.shutdown(), 2)
         assert running.done()
         assert connection._pc.connectionState == "closed"
+        assert connection._microphone is not None
         assert connection._microphone.readyState == "ended"
     finally:
         running.cancel()
@@ -202,11 +207,13 @@ async def test_shutdown_owns_in_progress_webrtc_handshake(monkeypatch):
 
 @pytest.mark.parametrize("ui_thread", [False, True], ids=["owner-loop", "ui-loop"])
 @pytest.mark.asyncio
-async def test_explicit_reconnect_replaces_real_webrtc_without_duplicate_receiver(monkeypatch, ui_thread):
+async def test_explicit_reconnect_replaces_real_webrtc_without_duplicate_receiver(
+    monkeypatch: pytest.MonkeyPatch, ui_thread: bool
+) -> None:
     """Reload uses the supervisor, closes the previous peer, and negotiates fresh state."""
     import json
 
-    from aiortc import RTCConfiguration, RTCPeerConnection, RTCSessionDescription
+    from aiortc import RTCDataChannel, RTCConfiguration, RTCPeerConnection, RTCSessionDescription
 
     from dj_reachy.config import config
     from dj_reachy.subscription_voice import SubscriptionRealtimeAdapter
@@ -214,19 +221,21 @@ async def test_explicit_reconnect_replaces_real_webrtc_without_duplicate_receive
     peers = []
     app = handler()
 
-    async def signal(body):
+    async def signal(body: dict[str, object]) -> dict[str, object]:
         peer = RTCPeerConnection(RTCConfiguration(iceServers=[]))
         peers.append(peer)
 
         @peer.on("datachannel")
-        def channel(channel):
+        def channel(channel: RTCDataChannel) -> None:
             channel.send(json.dumps({"type": "session.started", "session": {"id": str(len(peers))}}))
 
+        assert isinstance(body["sdp"], str)
         await peer.setRemoteDescription(RTCSessionDescription(sdp=body["sdp"], type="offer"))
         await peer.setLocalDescription(await peer.createAnswer())
+        assert peer.localDescription is not None
         return {"ok": True, "auth": "subscription", "transport": {"type": "webrtc", "sdp": peer.localDescription.sdp}}
 
-    def client(key):
+    def client(key: str | None) -> None:
         app.client = SubscriptionRealtimeAdapter(signal=signal)
 
     monkeypatch.setattr(config, "VOICE_BACKEND", "subscription")
@@ -252,11 +261,11 @@ async def test_explicit_reconnect_replaces_real_webrtc_without_duplicate_receive
             await peer.close()
 
 
-def test_subscription_selection_never_constructs_api_client(monkeypatch):
+def test_subscription_selection_never_constructs_api_client(monkeypatch: pytest.MonkeyPatch) -> None:
     """Even a supplied API key cannot be used by subscription Live."""
     from dj_reachy.config import config
 
-    def forbidden(**kwargs):
+    def forbidden(**kwargs: object) -> NoReturn:
         raise AssertionError("API-key billing was selected implicitly")
 
     monkeypatch.setattr(realtime, "AsyncOpenAI", forbidden)

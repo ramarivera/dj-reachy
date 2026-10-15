@@ -3,7 +3,7 @@ import time
 import base64
 import logging
 import threading
-from typing import Any, Dict
+from typing import TYPE_CHECKING, Any, Dict, Callable, Protocol
 from dataclasses import dataclass
 
 import cv2
@@ -12,11 +12,77 @@ import torch
 from numpy.typing import NDArray
 from transformers import AutoProcessor, AutoModelForImageTextToText
 from huggingface_hub import snapshot_download
+from transformers.generation.utils import GenerationMixin
 
 from dj_reachy.config import config
 
 
 logger = logging.getLogger(__name__)
+
+
+if TYPE_CHECKING:
+    class _VisionTokenizer(Protocol):
+        eos_token_id: int | list[int] | None
+
+    class _VisionInputProcessor(Protocol):
+        tokenizer: _VisionTokenizer
+
+        def apply_chat_template(
+            self,
+            messages: list[dict[str, object]],
+            *,
+            add_generation_prompt: bool,
+            tokenize: bool,
+            return_dict: bool,
+            return_tensors: str,
+        ) -> dict[str, torch.Tensor]: ...
+
+        def batch_decode(self, generated_ids: torch.Tensor, *, skip_special_tokens: bool) -> list[str]: ...
+
+
+class _VisionModelAdapter:
+    """Validate the dynamic model's generation interface and tensor output."""
+
+    def __init__(self, model: object) -> None:
+        if not isinstance(model, torch.nn.Module) or not isinstance(model, GenerationMixin):
+            raise TypeError("Vision model must be a torch module with Transformers generation support")
+        self._module: torch.nn.Module = model
+        self._generator: GenerationMixin = model
+
+    def to(self, device: str) -> "_VisionModelAdapter":
+        return _VisionModelAdapter(self._module.to(device))
+
+    def eval(self) -> "_VisionModelAdapter":
+        self._module.eval()
+        return self
+
+    def generate(
+        self,
+        *,
+        do_sample: bool,
+        max_new_tokens: int,
+        pad_token_id: int | list[int] | None,
+        **inputs: torch.Tensor,
+    ) -> torch.Tensor:
+        # Bind non-tensor generation controls to their SDK defaults before expanding model tensors.
+        generated = self._generator.generate(
+            **inputs,
+            generation_config=None,
+            logits_processor=None,
+            stopping_criteria=None,
+            prefix_allowed_tokens_fn=None,
+            synced_gpus=None,
+            assistant_model=None,
+            streamer=None,
+            use_model_defaults=None,
+            custom_generate=None,
+            do_sample=do_sample,
+            max_new_tokens=max_new_tokens,
+            pad_token_id=pad_token_id,
+        )
+        if not isinstance(generated, torch.Tensor):
+            raise TypeError("Vision model generation must return a tensor of token IDs")
+        return generated
 
 
 @dataclass
@@ -40,8 +106,8 @@ class VisionProcessor:
         self.vision_config = vision_config or VisionConfig()
         self.model_path = self.vision_config.model_path
         self.device = self._determine_device()
-        self.processor = None
-        self.model = None
+        self.processor: _VisionInputProcessor | None = None
+        self.model: _VisionModelAdapter | None = None
         self._initialized = False
 
     def _determine_device(self) -> str:
@@ -61,7 +127,8 @@ class VisionProcessor:
         """Load model and processor onto the selected device."""
         try:
             logger.info(f"Loading SmolVLM2 model on {self.device} (HF_HOME={config.HF_HOME})")
-            self.processor = AutoProcessor.from_pretrained(self.model_path)  # type: ignore
+            load_processor: Callable[[str], _VisionInputProcessor] = AutoProcessor.from_pretrained
+            self.processor = load_processor(self.model_path)
 
             # Select dtype depending on device
             if self.device == "cuda":
@@ -78,7 +145,8 @@ class VisionProcessor:
                 model_kwargs["_attn_implementation"] = "flash_attention_2"
 
             # Load model weights
-            self.model = AutoModelForImageTextToText.from_pretrained(self.model_path, **model_kwargs).to(self.device)  # type: ignore
+            model = AutoModelForImageTextToText.from_pretrained(self.model_path, **model_kwargs)
+            self.model = _VisionModelAdapter(model).to(self.device)
 
             if self.model is not None:
                 self.model.eval()
@@ -93,7 +161,7 @@ class VisionProcessor:
         self,
         cv2_image: NDArray[np.uint8],
         prompt: str = "Briefly describe what you see in one sentence.",
-    ) -> str:
+    ) -> str | None:
         """Process CV2 image and return description with retry logic."""
         if not self._initialized or self.processor is None or self.model is None:
             return "Vision model not initialized"
@@ -112,7 +180,7 @@ class VisionProcessor:
                 # Convert to base64
                 image_base64 = base64.b64encode(jpeg_buffer.tobytes()).decode("utf-8")
 
-                messages = [
+                messages: list[dict[str, object]] = [
                     {
                         "role": "user",
                         "content": [
@@ -176,6 +244,7 @@ class VisionProcessor:
                     time.sleep(self.vision_config.retry_delay)
                 else:
                     return f"Vision processing error after {self.vision_config.max_retries} attempts"
+        return None
 
     def _extract_response(self, full_text: str) -> str:
         """Extract the assistant's response from the full generated text."""

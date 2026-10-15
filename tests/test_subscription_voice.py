@@ -1,8 +1,20 @@
 from __future__ import annotations
+from typing import TypedDict
 
+import av
+import numpy as np
 import pytest
+from aiortc import RTCDataChannel, MediaStreamTrack
+from numpy.typing import NDArray
 
 from dj_reachy.subscription_voice import fast_control, build_context_messages, require_subscription_broker
+
+
+class ContextMessage(TypedDict):
+    """Fields observed on the consumer context data channel."""
+
+    delegation_item_id: str
+    content: list[dict[str, str]]
 
 
 def test_subscription_context_chunks_utf8_at_500_bytes() -> None:
@@ -22,7 +34,7 @@ def test_fast_controls_do_not_classify_general_requests() -> None:
     assert fast_control("sing me a song about a pause in the rain") is None
 
 
-def test_subscription_backend_fails_closed_without_scoped_broker(monkeypatch) -> None:
+def test_subscription_backend_fails_closed_without_scoped_broker(monkeypatch: pytest.MonkeyPatch) -> None:
     """Missing scoped signaling fails before any billing path can be chosen."""
     monkeypatch.delenv("DJ_REACHY_SUBSCRIPTION_BROKER_URL", raising=False)
     monkeypatch.delenv("DJ_REACHY_SUBSCRIPTION_BROKER_TOKEN", raising=False)
@@ -47,7 +59,7 @@ async def test_remote_pcm_uses_real_av_frames_without_padding() -> None:
         def __init__(self) -> None:
             self.count = 0
 
-        async def recv(self):
+        async def recv(self) -> av.AudioFrame:
             if self.count == 4:
                 raise MediaStreamError
             frame = av.AudioFrame.from_ndarray(np.full((1, 960), 12000, dtype=np.int16), format="s16", layout="mono")
@@ -80,36 +92,39 @@ async def test_real_webrtc_ready_context_pcm_and_cleanup() -> None:
     from dj_reachy.subscription_voice import SubscriptionRealtimeAdapter
 
     peer = RTCPeerConnection(RTCConfiguration(iceServers=[]))
-    received_context = asyncio.Queue()
-    received_pcm = asyncio.Queue()
+    received_context: asyncio.Queue[ContextMessage] = asyncio.Queue()
+    received_pcm: asyncio.Queue[av.AudioFrame] = asyncio.Queue()
     outgoing = MicrophoneTrack()
     outgoing.feed(np.full(24000, 8000, dtype=np.int16).tobytes())
     peer.addTrack(outgoing)
     readers = []
 
     @peer.on("track")
-    def track(track):
-        async def read():
+    def track(track: MediaStreamTrack) -> None:
+        async def read() -> None:
             while True:
                 frame = await track.recv()
+                assert isinstance(frame, av.AudioFrame)
                 if np.abs(frame.to_ndarray()).max() > 2000:
                     await received_pcm.put(frame)
 
         readers.append(asyncio.create_task(read()))
 
     @peer.on("datachannel")
-    def channel(channel):
+    def channel(channel: RTCDataChannel) -> None:
         @channel.on("message")
-        def message(text):
+        def message(text: str | bytes) -> None:
             received_context.put_nowait(json.loads(text))
 
         channel.send(json.dumps({"type": "session.started", "session": {"id": "fixture"}}))
 
-    async def signal(body):
+    async def signal(body: dict[str, object]) -> dict[str, object]:
         assert body["billing"] == "subscription"
         assert "greeting" not in body
+        assert isinstance(body["sdp"], str)
         await peer.setRemoteDescription(RTCSessionDescription(sdp=body["sdp"], type="offer"))
         await peer.setLocalDescription(await peer.createAnswer())
+        assert peer.localDescription is not None
         return {"ok": True, "auth": "subscription", "transport": {"type": "webrtc", "sdp": peer.localDescription.sdp}}
 
     connection = SubscriptionRealtimeAdapter(signal=signal).connect()
@@ -125,14 +140,16 @@ async def test_real_webrtc_ready_context_pcm_and_cleanup() -> None:
             )
             await asyncio.wait_for(received_pcm.get(), 5)
 
-            async def remote_audio():
+            async def remote_audio() -> NDArray[np.int16]:
                 async for event in connection:
                     if event.type == "response.audio.delta":
                         return np.frombuffer(base64.b64decode(event.delta), dtype=np.int16)
+                raise AssertionError("Connection ended without remote PCM")
 
             pcm = await asyncio.wait_for(remote_audio(), 5)
             assert np.abs(pcm).max() > 2000
         assert connection._pc.connectionState == "closed"
+        assert connection._microphone is not None
         assert connection._microphone.readyState == "ended"
     finally:
         await connection.close()
@@ -168,13 +185,13 @@ async def test_slow_audio_consumer_cannot_discard_stop_transcript() -> None:
         {"ok": True, "auth": "subscription", "transport": {"type": "webrtc", "sdp": "not-sdp"}},
     ],
 )
-async def test_enter_failure_closes_real_peer_and_media(answer) -> None:
+async def test_enter_failure_closes_real_peer_and_media(answer: dict[str, object]) -> None:
     """Reject wrong billing and malformed SDP before starting any audio or fallback."""
     from dj_reachy.subscription_voice import SubscriptionRealtimeAdapter
 
     posts = []
 
-    async def signal(body):
+    async def signal(body: dict[str, object]) -> dict[str, object]:
         posts.append(body)
         return answer
 
@@ -183,6 +200,7 @@ async def test_enter_failure_closes_real_peer_and_media(answer) -> None:
         await connection.__aenter__()
     assert len(posts) == 1
     assert connection._pc.connectionState == "closed"
+    assert connection._microphone is not None
     assert connection._microphone.readyState == "ended"
     assert connection._closed
 
@@ -212,18 +230,20 @@ async def test_context_waits_for_consumer_ready_not_only_channel_open() -> None:
     remote_channel = []
 
     @peer.on("datachannel")
-    def channel(channel):
+    def channel(channel: RTCDataChannel) -> None:
         remote_channel.append(channel)
         channel_ready.set()
 
         @channel.on("message")
-        def message(raw):
+        def message(raw: str | bytes) -> None:
             if json.loads(raw)["type"] != "session.close":
                 received.set()
 
-    async def signal(body):
+    async def signal(body: dict[str, object]) -> dict[str, object]:
+        assert isinstance(body["sdp"], str)
         await peer.setRemoteDescription(RTCSessionDescription(sdp=body["sdp"], type="offer"))
         await peer.setLocalDescription(await peer.createAnswer())
+        assert peer.localDescription is not None
         return {"ok": True, "auth": "subscription", "transport": {"type": "webrtc", "sdp": peer.localDescription.sdp}}
 
     connection = SubscriptionRealtimeAdapter(signal=signal).connect()

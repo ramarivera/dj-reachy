@@ -3,15 +3,18 @@
 from __future__ import annotations
 import json
 import threading
+from typing import NoReturn
+from pathlib import Path
 from contextlib import contextmanager
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+from collections.abc import Iterator
 
 import httpx
 import pytest
 
 
 @contextmanager
-def serving(server):
+def serving(server: ThreadingHTTPServer) -> Iterator[str]:
     """Own a loopback HTTP server for one test."""
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -23,7 +26,7 @@ def serving(server):
         thread.join(timeout=2)
 
 
-def test_broker_auth_contains_credentials_and_preserves_consumer_contract():
+def test_broker_auth_contains_credentials_and_preserves_consumer_contract() -> None:
     """Reject unauthenticated calls before resolving OAuth; forward exact session config."""
     from dj_reachy.subscription_broker import BrokerService, CodexCredential, create_server
 
@@ -31,17 +34,17 @@ def test_broker_auth_contains_credentials_and_preserves_consumer_contract():
     resolved = []
 
     class Upstream(BaseHTTPRequestHandler):
-        def do_POST(self):
+        def do_POST(self) -> None:
             observed.append((dict(self.headers), json.loads(self.rfile.read(int(self.headers["Content-Length"])))))
             self.send_response(201)
             self.send_header("Location", "/backend-api/codex/realtime/calls/rtc_fixture")
             self.end_headers()
             self.wfile.write(b"v=0\r\nfixture-answer\r\n")
 
-        def log_message(self, *_args):
+        def log_message(self, format: str, *args: object) -> None:
             pass
 
-    def credential():
+    def credential() -> CodexCredential:
         resolved.append(True)
         return CodexCredential("fixture-oauth-private", "fixture-account-private")
 
@@ -88,7 +91,7 @@ def test_broker_auth_contains_credentials_and_preserves_consumer_contract():
                 assert len(resolved) == len(observed) == 1
 
 
-def test_remote_broker_requires_tls_and_strong_token():
+def test_remote_broker_requires_tls_and_strong_token() -> None:
     """Remote plaintext listeners and absent authentication are never allowed."""
     from dj_reachy.subscription_broker import BrokerService, CodexCredential, create_server
 
@@ -99,12 +102,12 @@ def test_remote_broker_requires_tls_and_strong_token():
         create_server(service, "")
 
 
-def test_subscription_planner_sse_tool_round_and_no_arbitrary_authority():
+def test_subscription_planner_sse_tool_round_and_no_arbitrary_authority() -> None:
     """Use actual HTTP/SSE, retain tool IDs/results, reject unsafe model calls."""
     from dj_reachy.subscription_broker import BrokerService, CodexCredential, create_server
 
     requests = []
-    call = {
+    call: dict[str, object] = {
         "type": "function_call",
         "id": "fc_1",
         "call_id": "call_song",
@@ -114,10 +117,10 @@ def test_subscription_planner_sse_tool_round_and_no_arbitrary_authority():
     }
 
     class Upstream(BaseHTTPRequestHandler):
-        def do_POST(self):
+        def do_POST(self) -> None:
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             requests.append((dict(self.headers), body))
-            output = (
+            output: list[dict[str, object]] = (
                 [call]
                 if len(requests) == 1
                 else [
@@ -133,17 +136,17 @@ def test_subscription_planner_sse_tool_round_and_no_arbitrary_authority():
             self.send_header("Content-Type", "text/event-stream")
             self.end_headers()
             # Real providers duplicate the completed item in the final response.
-            events = [
+            events: list[dict[str, object]] = [
                 {"type": "response.output_item.done", "item": output[0]},
                 {"type": "response.completed", "response": {"id": "r1", "status": "completed", "output": output}},
             ]
             for event in events:
-                raw = ("event: " + event["type"] + "\ndata: " + json.dumps(event) + "\n\n").encode()
+                raw = f"event: {event['type']}\ndata: {json.dumps(event)}\n\n".encode()
                 for start in range(0, len(raw), 17):
                     self.wfile.write(raw[start : start + 17])
                     self.wfile.flush()
 
-        def log_message(self, *_args):
+        def log_message(self, format: str, *args: object) -> None:
             pass
 
     with serving(ThreadingHTTPServer(("127.0.0.1", 0), Upstream)) as upstream:
@@ -198,7 +201,7 @@ def test_subscription_planner_sse_tool_round_and_no_arbitrary_authority():
                 assert "fixture-provider" not in first.text + second.text
 
 
-def test_app_calls_reject_unbounded_or_unknown_commands():
+def test_app_calls_reject_unbounded_or_unknown_commands() -> None:
     """Treat model/tool payloads as untrusted, including tools in broker history."""
     from dj_reachy.voice_planner import validate_app_call
 
@@ -213,7 +216,9 @@ def test_app_calls_reject_unbounded_or_unknown_commands():
             validate_app_call(name, args)
 
 
-def test_explicit_codex_fixture_resolver_never_uses_api_key(tmp_path, monkeypatch):
+def test_explicit_codex_fixture_resolver_never_uses_api_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Read only an injected fixture path, and reject an API-key or expired sign-in."""
     from dj_reachy.subscription_broker import BrokerError, codex_file_resolver
 
@@ -248,7 +253,7 @@ def test_explicit_codex_fixture_resolver_never_uses_api_key(tmp_path, monkeypatc
         {"type": "response.output_item.done", "item": {"type": "function_call", "call_id": "incomplete"}},
     ],
 )
-def test_planner_never_executes_partial_or_failed_sse(event):
+def test_planner_never_executes_partial_or_failed_sse(event: dict[str, object]) -> None:
     """EOF and partial function arguments aren't evidence of a completed tool call."""
     from dj_reachy.voice_planner import _sse_completed
     from dj_reachy.subscription_broker import BrokerError
@@ -259,11 +264,11 @@ def test_planner_never_executes_partial_or_failed_sse(event):
     assert "fixture-private-secret" not in str(failure.value)
 
 
-def test_non_ascii_bad_authorization_is_rejected_before_credentials():
+def test_non_ascii_bad_authorization_is_rejected_before_credentials() -> None:
     """Malformed untrusted headers get 401, never a traceback or credential lookup."""
     from dj_reachy.subscription_broker import BrokerService, create_server
 
-    def forbidden():
+    def forbidden() -> NoReturn:
         raise AssertionError("Credentials must not be resolved")
 
     with serving(create_server(BrokerService(forbidden), "fixture-scoped-token-32-characters", port=0)) as broker:
@@ -273,18 +278,20 @@ def test_non_ascii_bad_authorization_is_rejected_before_credentials():
 
 
 @pytest.mark.asyncio
-async def test_broker_client_reports_actionable_entitlement_without_provider_body(monkeypatch):
+async def test_broker_client_reports_actionable_entitlement_without_provider_body(
+    monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Propagate the host's safe diagnosis while keeping OAuth and upstream bodies host-side."""
     from dj_reachy.subscription_voice import broker_request
     from dj_reachy.subscription_broker import BrokerService, CodexCredential, create_server
 
     class RejectedProvider(BaseHTTPRequestHandler):
-        def do_POST(self):
+        def do_POST(self) -> None:
             self.send_response(403)
             self.end_headers()
             self.wfile.write(b"fixture-provider-private-body")
 
-        def log_message(self, *_args):
+        def log_message(self, format: str, *args: object) -> None:
             pass
 
     with serving(ThreadingHTTPServer(("127.0.0.1", 0), RejectedProvider)) as upstream:
