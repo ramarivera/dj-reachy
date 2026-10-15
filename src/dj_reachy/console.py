@@ -52,6 +52,7 @@ class LocalStream:
         if not any(getattr(route, "path", None) == "/static" for route in app.routes):
             app.mount("/static", StaticFiles(directory=static_dir), name="static")
         if not any(getattr(route, "path", None) == "/" for route in app.routes):
+
             @app.get("/")
             def settings_page() -> FileResponse:
                 return FileResponse(static_dir / "index.html")
@@ -86,6 +87,7 @@ class LocalStream:
                     await asyncio.sleep(0.2)
                 if self._stop_event.is_set():
                     return
+                self.handler.diagnostics.start()
                 self._robot.media.start_recording()
                 self._robot.media.start_playing()
                 self._tasks = [
@@ -136,10 +138,21 @@ class LocalStream:
     async def record_loop(self) -> None:
         """Forward microphone frames to the active voice adapter."""
         sample_rate = self._robot.media.get_input_audio_samplerate()
+        try:
+            self.handler.diagnostics.capture_configuration(
+                backend=self._robot.media.audio,
+                rate=sample_rate,
+                channels=self._robot.media.get_input_channels(),
+            )
+        except Exception:
+            self.handler.diagnostics.capture_configuration_unavailable()
         while not self._stop_event.is_set():
             audio_frame = self._robot.media.get_audio_sample()
             if audio_frame is not None:
+                self.handler.diagnostics.audio("capture", audio_frame, sample_rate)
                 await self.handler.receive((sample_rate, audio_frame))
+            else:
+                self.handler.diagnostics.drop("capture_empty")
             await asyncio.sleep(0.005)
 
     async def play_loop(self) -> None:

@@ -19,6 +19,7 @@ from websockets.exceptions import ConnectionClosedError
 from dj_reachy.config import config
 from dj_reachy.prompts import get_session_voice, get_session_instructions
 from dj_reachy.tools.core_tools import ToolDependencies, get_tool_specs, dispatch_tool_call
+from dj_reachy.audio_diagnostics import Phase, AudioDiagnostics
 from dj_reachy.subscription_voice import SubscriptionRealtimeAdapter, fast_control
 
 
@@ -48,6 +49,7 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
         """Initialize lifecycle state without opening providers or hardware."""
         super().__init__(expected_layout="mono", output_sample_rate=24000, input_sample_rate=24000)
         self.deps = deps
+        self.diagnostics = AudioDiagnostics()
         self.gradio_mode = gradio_mode
         self.instance_path = instance_path
         self.connection: Any = None
@@ -96,13 +98,18 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
         return self.connection is connection and not self._shutdown_requested and self._work_epoch == epoch
 
     async def _dispatch(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+        self.diagnostics.lifecycle("tool", "started", name=name)
         try:
-            return await dispatch_tool_call(name, json.dumps(args), self.deps)
+            result = await dispatch_tool_call(name, json.dumps(args), self.deps)
         except asyncio.CancelledError:
+            self.diagnostics.lifecycle("tool", "cancelled", name=name)
             raise
         except Exception as exc:
+            self.diagnostics.lifecycle("tool", "failed", name=name)
             # Provider exceptions can echo credentials. Only the class crosses the voice boundary.
             return {"error": type(exc).__name__, "message": "App command failed; no automatic retry was made."}
+        self.diagnostics.lifecycle("tool", "failed" if "error" in result else "completed", name=name)
+        return result
 
     def _stop_work(self) -> asyncio.Task[dict[str, Any]]:
         """Invalidate planner/generation work synchronously before scheduling local stop."""
@@ -268,6 +275,8 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
         connection, epoch = self.connection, self._work_epoch
         if connection is None:
             return
+        self.diagnostics.lifecycle("delegation", "started")
+        outcome: Phase = "completed"
         try:
             if not transcript:
                 await connection.send_context(
@@ -289,7 +298,16 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
             from dj_reachy.voice_planner import MAX_CALLS, MAX_ROUNDS, validate_app_call
 
             for _round in range(MAX_ROUNDS):
-                step = await connection.plan(transcript, history)
+                self.diagnostics.lifecycle("planner", "started")
+                try:
+                    step = await connection.plan(transcript, history)
+                except asyncio.CancelledError:
+                    self.diagnostics.lifecycle("planner", "cancelled")
+                    raise
+                except Exception:
+                    self.diagnostics.lifecycle("planner", "failed")
+                    raise
+                self.diagnostics.lifecycle("planner", "completed")
                 if not self._current(connection, epoch):
                     return
                 calls = step.get("calls")
@@ -321,19 +339,26 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
                     await connection.send_context(json.dumps({"tool": name, "result": result}), "commentary", identity)
             raise RuntimeError("App planner reached its bounded round limit")
         except asyncio.CancelledError:
+            outcome = "cancelled"
             raise
         except Exception as exc:
+            outcome = "failed"
             if self._current(connection, epoch):
                 # Broker/validation errors are safe application messages; other exceptions are class-only.
                 detail = str(exc) if isinstance(exc, (ValueError, RuntimeError)) else type(exc).__name__
                 await connection.send_context(
                     f"App task failed: {detail}. No automatic retry or API fallback was used.", "speakable", identity
                 )
+        finally:
+            self.diagnostics.lifecycle("delegation", outcome)
 
     def _create_client(self, openai_key: str | None) -> None:
         if voice_config.VOICE_BACKEND == "subscription":
             self.client = SubscriptionRealtimeAdapter(
-                model=voice_config.VOICE_MODEL, voice=voice_config.VOICE_NAME, instructions=get_session_instructions()
+                model=voice_config.VOICE_MODEL,
+                voice=voice_config.VOICE_NAME,
+                instructions=get_session_instructions(),
+                diagnostics=self.diagnostics,
             )
         elif voice_config.VOICE_BACKEND == "api_key":
             if not openai_key or not openai_key.strip():
@@ -363,6 +388,9 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
             set_api_keys(openai_key, eleven_key)
         self.deps.elevenlabs_api_key = eleven_key.strip() if eleven_key else None
         self._shutdown_requested = False
+        if self.diagnostics.closed:
+            self.diagnostics = AudioDiagnostics(home=self.diagnostics.home)
+        self.diagnostics.start()
         self._supervisor = asyncio.current_task()
         attempt = 0
         try:
@@ -392,6 +420,7 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
                         await self.client.close()
         finally:
             self._supervisor = None
+            self.diagnostics.close()
 
     async def _run_realtime_session(self) -> None:
         async with self.client.realtime.connect(model=voice_config.VOICE_MODEL) as conn:
@@ -425,6 +454,7 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
 
     async def _handle_event(self, event: Any) -> None:
         kind = event.type
+        self.diagnostics.provider_event(kind, origin="handled")
         if kind in ("input_transcript.added", "output_transcript.added"):
             item = getattr(event, "item", {})
             text = item.get("text", "") if isinstance(item, dict) else ""
@@ -533,23 +563,32 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
             return "Instructions will load on the next voice connection."
         return await self.reload_instructions()
 
-    async def receive(self, frame: tuple[int, NDArray[np.int16]]) -> None:
+    async def receive(self, frame: tuple[int, NDArray[np.int16 | np.float32]]) -> None:
         """Send supplied PCM to the selected adapter, never open a microphone device."""
         connection = self.connection
         if connection is None:
+            self.diagnostics.drop("no_connection")
             return
         rate, audio = frame
-        if audio.ndim == 2:
-            if audio.shape[1] > audio.shape[0]:
-                audio = audio.T
-            if audio.shape[1] > 1:
-                audio = audio[:, 0]
-        if rate != 24000:
-            audio = resample(audio, int(len(audio) * 24000 / rate))
-        pcm = audio_to_int16(audio)
+        try:
+            if audio.ndim == 2:
+                if audio.shape[1] > audio.shape[0]:
+                    audio = audio.T
+                if audio.shape[1] > 1:
+                    audio = audio[:, 0]
+            self.diagnostics.audio("selected", audio, rate)
+            if rate != 24000:
+                audio = resample(audio, int(len(audio) * 24000 / rate))
+            self.diagnostics.audio("resampled", audio, 24000)
+            pcm = audio_to_int16(audio)
+            self.diagnostics.audio("encoded", pcm, 24000)
+        except Exception:
+            self.diagnostics.drop("conversion_failed")
+            raise
         try:
             await connection.input_audio_buffer.append(audio=base64.b64encode(pcm.tobytes()).decode("ascii"))
         except (ConnectionError, RuntimeError):
+            self.diagnostics.drop("append_failed", size_bytes=pcm.nbytes)
             logger.debug("Audio input discarded during reconnect")
 
     async def emit(self) -> tuple[int, NDArray[np.int16]] | AdditionalOutputs | None:
@@ -570,6 +609,7 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
         self._connected_event.clear()
         while not self.output_queue.empty():
             self.output_queue.get_nowait()
+        self.diagnostics.close()
 
     def format_timestamp(self) -> str:
         """Format wall-clock time and monotonic elapsed time."""

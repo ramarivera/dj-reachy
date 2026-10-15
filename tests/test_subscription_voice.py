@@ -1,5 +1,6 @@
 from __future__ import annotations
 from typing import TypedDict
+from pathlib import Path
 
 import av
 import numpy as np
@@ -79,7 +80,7 @@ async def test_remote_pcm_uses_real_av_frames_without_padding() -> None:
 
 
 @pytest.mark.asyncio
-async def test_real_webrtc_ready_context_pcm_and_cleanup() -> None:
+async def test_real_webrtc_ready_context_pcm_and_cleanup(tmp_path: Path) -> None:
     """Negotiate actual loopback peers, send pending context and both media directions."""
     import json
     import base64
@@ -128,6 +129,7 @@ async def test_real_webrtc_ready_context_pcm_and_cleanup() -> None:
         return {"ok": True, "auth": "subscription", "transport": {"type": "webrtc", "sdp": peer.localDescription.sdp}}
 
     connection = SubscriptionRealtimeAdapter(signal=signal).connect()
+    connection.diagnostics.home = tmp_path
     try:
         await connection.send_context("pending 🌶", "commentary", "d-1")
         async with connection:
@@ -151,6 +153,23 @@ async def test_real_webrtc_ready_context_pcm_and_cleanup() -> None:
         assert connection._pc.connectionState == "closed"
         assert connection._microphone is not None
         assert connection._microphone.readyState == "ended"
+        assert connection._stats_task is not None
+        assert connection._stats_task.done()
+        assert connection.diagnostics.closed
+        assert not connection.diagnostics.owned_handlers
+        diagnostic_text = (tmp_path / "logs" / "audio-trace.jsonl").read_text()
+        diagnostic_events = [json.loads(line) for line in diagnostic_text.splitlines()]
+        stats = [event for event in diagnostic_events if event["event"] == "webrtc_stats"]
+        summary = diagnostic_events[-1]
+        assert stats
+        assert summary["webrtc"]["packets_sent"] > 0
+        assert summary["webrtc"]["bytes_sent"] > 0
+        assert summary["webrtc"]["connection_state"] == "connected"
+        assert summary["counts"]["provider.session"] >= 1
+        assert summary["last_audio_boundary"] == "track"
+        assert "pending 🌶" not in diagnostic_text
+        assert "v=0" not in diagnostic_text
+        assert "fixture" not in diagnostic_text
     finally:
         await connection.close()
         for reader in readers:

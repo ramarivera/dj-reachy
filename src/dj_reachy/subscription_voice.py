@@ -17,10 +17,13 @@ from urllib.parse import urlparse
 
 import av
 import httpx
+import numpy as np
 from aiortc import RTCConfiguration, RTCPeerConnection, RTCSessionDescription
+from aiortc.stats import RTCOutboundRtpStreamStats
 from aiortc.mediastreams import MediaStreamError
 
 from dj_reachy.voice_media import MicrophoneTrack
+from dj_reachy.audio_diagnostics import AudioDiagnostics
 
 
 BROKER_URL_ENV = "DJ_REACHY_SUBSCRIPTION_BROKER_URL"
@@ -172,6 +175,7 @@ class SubscriptionRealtimeAdapter:
         instructions: str = "",
         signal: Signal | None = None,
         ready_timeout: float = 20,
+        diagnostics: AudioDiagnostics | None = None,
     ):
         """Inject signaling for loopback qualification; production uses the scoped broker."""
         self.model = model or DEFAULT_MODEL
@@ -179,6 +183,7 @@ class SubscriptionRealtimeAdapter:
         self.instructions = instructions
         self.signal = signal or broker_request
         self.ready_timeout = ready_timeout
+        self.diagnostics = diagnostics
         self.realtime = SimpleNamespace(connect=self.connect)
 
     def connect(self, **_kwargs: Any) -> SubscriptionRealtimeConnection:
@@ -192,11 +197,14 @@ class SubscriptionRealtimeConnection:
     def __init__(self, adapter: SubscriptionRealtimeAdapter):
         """Initialize without reading credentials or opening a socket."""
         self.adapter = adapter
+        self.diagnostics = adapter.diagnostics or AudioDiagnostics()
+        self._owns_diagnostics = adapter.diagnostics is None
         self._events: asyncio.Queue[Any] = asyncio.Queue(maxsize=256)
         self._audio_events: asyncio.Queue[Any] = asyncio.Queue(maxsize=64)
         self._available = asyncio.Event()
         self._pending: deque[str] = deque()
         self._audio_readers: list[asyncio.Task[None]] = []
+        self._stats_task: asyncio.Task[None] | None = None
         self._closed = False
         self._user_transcript = ""
         self._current_input = ""
@@ -210,6 +218,9 @@ class SubscriptionRealtimeConnection:
         self.input_audio_buffer = SimpleNamespace(append=self._append_audio)
 
     def _enqueue(self, event: Any) -> None:
+        kind = getattr(event, "type", None)
+        if isinstance(kind, str):
+            self.diagnostics.provider_event(kind)
         if getattr(event, "type", None) == "response.audio.delta":
             if self._audio_events.full():
                 self._audio_events.get_nowait()
@@ -225,9 +236,11 @@ class SubscriptionRealtimeConnection:
 
     async def __aenter__(self) -> SubscriptionRealtimeConnection:
         """Perform exactly one signaling POST and wait for consumer session.started."""
+        self.diagnostics.start()
+        self.diagnostics.lifecycle("connection", "started")
         try:
             self._pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
-            self._microphone = MicrophoneTrack()
+            self._microphone = MicrophoneTrack(diagnostics=self.diagnostics)
             self._pc.addTrack(self._microphone)
             self._channel = self._pc.createDataChannel(CHANNEL)
 
@@ -291,11 +304,44 @@ class SubscriptionRealtimeConnection:
             ):
                 raise RuntimeError("Subscription broker returned an invalid WebRTC answer.")
             await self._pc.setRemoteDescription(RTCSessionDescription(sdp=transport["sdp"], type="answer"))
+            self._stats_task = asyncio.create_task(self._monitor_stats(), name="voice-audio-diagnostics-stats")
             await asyncio.wait_for(self.ready.wait(), self.adapter.ready_timeout)
+            self.diagnostics.lifecycle("connection", "completed")
             return self
         except BaseException:
+            self.diagnostics.lifecycle("connection", "failed")
             await self.close()
             raise
+
+    async def _collect_stats(self) -> None:
+        """Observe real aiortc outbound audio stats without retaining its report."""
+        pc: RTCPeerConnection | None = self._pc
+        if pc is None:
+            return
+        try:
+            report = await pc.getStats()
+            packets = 0
+            size = 0
+            for stat in report.values():
+                if isinstance(stat, RTCOutboundRtpStreamStats) and stat.kind == "audio":
+                    packets += stat.packetsSent
+                    size += stat.bytesSent
+            self.diagnostics.webrtc(
+                packets_sent=packets,
+                bytes_sent=size,
+                connection_state=pc.connectionState,
+                ice_state=pc.iceConnectionState,
+                signaling_state=pc.signalingState,
+                channel_state=self._channel.readyState if self._channel is not None else "unknown",
+            )
+        except Exception:
+            self.diagnostics.stats_failed()
+
+    async def _monitor_stats(self) -> None:
+        """Own a low-frequency observer, never another provider connection."""
+        while not self._closed:
+            await self._collect_stats()
+            await asyncio.sleep(5)
 
     async def _read_remote_audio(self, track: Any, av: Any, media_stream_error: type[Exception]) -> None:
         resampler = av.AudioResampler(format="s16", layout="mono", rate=24000)
@@ -321,7 +367,12 @@ class SubscriptionRealtimeConnection:
 
     async def _append_audio(self, *, audio: str) -> None:
         if self._microphone is not None and not self._closed:
-            self._microphone.feed(base64.b64decode(audio, validate=True))
+            pcm = base64.b64decode(audio, validate=True)
+            self.diagnostics.audio("append", np.frombuffer(pcm, dtype=np.int16), 24000)
+            self._microphone.feed(pcm)
+            self.diagnostics.flow("append", input_bytes=len(pcm), backlog_bytes=len(self._microphone.backlog))
+        else:
+            self.diagnostics.drop("connection_closed" if self._closed else "no_microphone")
 
     async def send_event(self, message: dict[str, Any]) -> None:
         """Queue pre-open sends, failing explicitly rather than dropping context."""
@@ -350,22 +401,37 @@ class SubscriptionRealtimeConnection:
         """End the consumer session, all reader tasks, media and queued input."""
         if self._closed:
             return
-        if self._channel is not None and self._channel.readyState == "open":
-            self._channel.send(json.dumps({"type": "session.close"}))
         self._closed = True
-        self.ready.clear()
-        for task in self._audio_readers:
-            task.cancel()
-        await asyncio.gather(*self._audio_readers, return_exceptions=True)
-        if self._microphone is not None:
-            self._microphone.stop()
-        if self._pc is not None:
-            await self._pc.close()
-        self._pending.clear()
-        for queue in (self._events, self._audio_events):
-            while not queue.empty():
-                queue.get_nowait()
-        self._enqueue(None)
+        try:
+            if self._pc is not None:
+                try:
+                    await asyncio.wait_for(self._collect_stats(), timeout=0.25)
+                except asyncio.TimeoutError:
+                    self.diagnostics.stats_failed()
+            if self._channel is not None and self._channel.readyState == "open":
+                self._channel.send(json.dumps({"type": "session.close"}))
+        finally:
+            try:
+                self.ready.clear()
+                if self._stats_task is not None:
+                    self._stats_task.cancel()
+                    await asyncio.gather(self._stats_task, return_exceptions=True)
+                for task in self._audio_readers:
+                    task.cancel()
+                await asyncio.gather(*self._audio_readers, return_exceptions=True)
+                if self._microphone is not None:
+                    self._microphone.stop()
+                if self._pc is not None:
+                    await self._pc.close()
+            finally:
+                self._pending.clear()
+                for queue in (self._events, self._audio_events):
+                    while not queue.empty():
+                        queue.get_nowait()
+                self._enqueue(None)
+                self.diagnostics.lifecycle("connection", "closed")
+                if self._owns_diagnostics:
+                    self.diagnostics.close()
 
     async def __aexit__(self, *_args: Any) -> None:
         """Close on normal exit as well as exceptions."""
