@@ -3,7 +3,7 @@ import time
 import base64
 import logging
 import threading
-from typing import Any, Dict
+from typing import TYPE_CHECKING, Any, Dict, Callable, Protocol
 from dataclasses import dataclass
 
 import cv2
@@ -17,6 +17,49 @@ from dj_reachy.config import config
 
 
 logger = logging.getLogger(__name__)
+
+
+if TYPE_CHECKING:
+    class _VisionTokenizer(Protocol):
+        eos_token_id: int | list[int] | None
+
+    class _VisionInputProcessor(Protocol):
+        tokenizer: _VisionTokenizer
+
+        def apply_chat_template(
+            self,
+            messages: list[dict[str, object]],
+            *,
+            add_generation_prompt: bool,
+            tokenize: bool,
+            return_dict: bool,
+            return_tensors: str,
+        ) -> dict[str, torch.Tensor]: ...
+
+        def batch_decode(self, generated_ids: torch.Tensor, *, skip_special_tokens: bool) -> list[str]: ...
+
+    class _VisionModel(Protocol):
+        def to(self, device: str) -> "_VisionModel": ...
+
+        def eval(self) -> "_VisionModel": ...
+
+        def generate(
+            self,
+            *,
+            do_sample: bool,
+            max_new_tokens: int,
+            pad_token_id: int | list[int] | None,
+            **inputs: torch.Tensor,
+        ) -> torch.Tensor: ...
+
+    class _VisionModelLoader(Protocol):
+        def __call__(
+            self,
+            model_path: str,
+            *,
+            dtype: torch.dtype,
+            _attn_implementation: str = ...,
+        ) -> _VisionModel: ...
 
 
 @dataclass
@@ -40,8 +83,8 @@ class VisionProcessor:
         self.vision_config = vision_config or VisionConfig()
         self.model_path = self.vision_config.model_path
         self.device = self._determine_device()
-        self.processor = None
-        self.model = None
+        self.processor: _VisionInputProcessor | None = None
+        self.model: _VisionModel | None = None
         self._initialized = False
 
     def _determine_device(self) -> str:
@@ -61,7 +104,8 @@ class VisionProcessor:
         """Load model and processor onto the selected device."""
         try:
             logger.info(f"Loading SmolVLM2 model on {self.device} (HF_HOME={config.HF_HOME})")
-            self.processor = AutoProcessor.from_pretrained(self.model_path)  # type: ignore
+            load_processor: Callable[[str], _VisionInputProcessor] = AutoProcessor.from_pretrained
+            self.processor = load_processor(self.model_path)
 
             # Select dtype depending on device
             if self.device == "cuda":
@@ -78,7 +122,8 @@ class VisionProcessor:
                 model_kwargs["_attn_implementation"] = "flash_attention_2"
 
             # Load model weights
-            self.model = AutoModelForImageTextToText.from_pretrained(self.model_path, **model_kwargs).to(self.device)  # type: ignore
+            load_model: _VisionModelLoader = AutoModelForImageTextToText.from_pretrained
+            self.model = load_model(self.model_path, **model_kwargs).to(self.device)
 
             if self.model is not None:
                 self.model.eval()
@@ -93,7 +138,7 @@ class VisionProcessor:
         self,
         cv2_image: NDArray[np.uint8],
         prompt: str = "Briefly describe what you see in one sentence.",
-    ) -> str:
+    ) -> str | None:
         """Process CV2 image and return description with retry logic."""
         if not self._initialized or self.processor is None or self.model is None:
             return "Vision model not initialized"
@@ -112,7 +157,7 @@ class VisionProcessor:
                 # Convert to base64
                 image_base64 = base64.b64encode(jpeg_buffer.tobytes()).decode("utf-8")
 
-                messages = [
+                messages: list[dict[str, object]] = [
                     {
                         "role": "user",
                         "content": [
@@ -176,6 +221,7 @@ class VisionProcessor:
                     time.sleep(self.vision_config.retry_delay)
                 else:
                     return f"Vision processing error after {self.vision_config.max_retries} attempts"
+        return None
 
     def _extract_response(self, full_text: str) -> str:
         """Extract the assistant's response from the full generated text."""
