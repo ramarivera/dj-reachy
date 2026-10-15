@@ -41,6 +41,25 @@ def update_chatbot(chatbot: list[dict[str, Any]], response: dict[str, Any]) -> l
 
 
 def mount_voice_ui(app: FastAPI, handler: OpenaiRealtimeHandler) -> Stream:
+    """Build Gradio on a running loop without replacing the caller's idle loop."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        # Gradio's synchronous fallback allocates and installs an idle loop for
+        # each App it builds. Keep construction on one owned running loop instead.
+        # The UI's lazy locks/events bind later, during the serving lifespan.
+        async def construct() -> Stream:
+            return _mount_voice_ui(app, handler)
+
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(construct())
+        finally:
+            loop.close()
+    return _mount_voice_ui(app, handler)
+
+
+def _mount_voice_ui(app: FastAPI, handler: OpenaiRealtimeHandler) -> Stream:
     """Mount browser voice at /voice alongside the shared control panel at /."""
     from dj_reachy.config import config
     from dj_reachy.openai_realtime import OpenaiRealtimeHandler
