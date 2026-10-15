@@ -3,6 +3,7 @@
 from __future__ import annotations
 import json
 import asyncio
+from pathlib import Path
 
 import pytest
 import test_music_lifecycle as lifecycle
@@ -16,7 +17,9 @@ real_mp3 = lifecycle.real_mp3
 
 
 @pytest.mark.asyncio
-async def test_safe_library_list_replay_and_delete(monkeypatch, tmp_path, actor, real_mp3):
+async def test_safe_library_list_replay_and_delete(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, actor: lifecycle.PlaybackActor, real_mp3: Path
+) -> None:
     """List, decode and delete exact legacy filenames without regenerating."""
     root = tmp_path / "songs"
     root.mkdir()
@@ -28,7 +31,7 @@ async def test_safe_library_list_replay_and_delete(monkeypatch, tmp_path, actor,
     outside.write_bytes(real_mp3.read_bytes())
     (root / "linked.mp3").symlink_to(outside)
 
-    def no_provider(*_args):
+    def no_provider(*_args: object) -> str:
         raise AssertionError("Replay must never read provider credentials or regenerate")
 
     monkeypatch.setattr(music, "_get_elevenlabs_key", no_provider)
@@ -58,7 +61,9 @@ async def test_safe_library_list_replay_and_delete(monkeypatch, tmp_path, actor,
         "\x00.mp3",
     ],
 )
-async def test_unsafe_library_entries_are_rejected_everywhere(monkeypatch, tmp_path, actor, filename):
+async def test_unsafe_library_entries_are_rejected_everywhere(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, actor: lifecycle.PlaybackActor, filename: str
+) -> None:
     """Reject traversal, symlinks and special files across all library operations."""
     import os
 
@@ -80,7 +85,7 @@ async def test_unsafe_library_entries_are_rejected_everywhere(monkeypatch, tmp_p
     assert outside.read_bytes() == b"never follow this"
 
 
-def test_library_root_symlink_is_rejected(monkeypatch, tmp_path):
+def test_library_root_symlink_is_rejected(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Reject a redirected library root instead of following it."""
     target = tmp_path / "target"
     target.mkdir()
@@ -92,7 +97,9 @@ def test_library_root_symlink_is_rejected(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_replay_pins_no_follow_file_before_decoder_spawn(monkeypatch, tmp_path, actor, real_mp3):
+async def test_replay_pins_no_follow_file_before_decoder_spawn(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, actor: lifecycle.PlaybackActor, real_mp3: Path
+) -> None:
     """Keep decoding the validated inode when its filename changes before spawn."""
     monkeypatch.setattr(config, "SONGS_DIR", tmp_path)
     song = tmp_path / "pinned.mp3"
@@ -101,10 +108,12 @@ async def test_replay_pins_no_follow_file_before_decoder_spawn(monkeypatch, tmp_
     outside.write_bytes(b"not audio")
     spawn = asyncio.create_subprocess_exec
 
-    async def replace_before_spawn(*args, **kwargs):
+    async def replace_before_spawn(
+        *args: str, stdout: int, stderr: int, pass_fds: tuple[int, ...] = ()
+    ) -> asyncio.subprocess.Process:
         song.unlink()
         song.symlink_to(outside)
-        return await spawn(*args, **kwargs)
+        return await spawn(*args, stdout=stdout, stderr=stderr, pass_fds=pass_fds)
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", replace_before_spawn)
     result = await music.PlaySavedSong()(actor.deps, filename="pinned.mp3")

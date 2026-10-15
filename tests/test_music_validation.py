@@ -1,6 +1,7 @@
 """Offline request validation, including nested provider inputs."""
 
 from __future__ import annotations
+from unittest.mock import Mock
 
 import pytest
 
@@ -52,20 +53,23 @@ from dj_reachy.profiles.dj_reachy.make_song_and_dance import build_music_payload
         },
     ],
 )
-def test_malformed_request_is_rejected_locally(changes):
+def test_malformed_request_is_rejected_locally(changes: dict[str, object]) -> None:
     """Reject malformed provider inputs, including all nested plan field types."""
-    options = {"prompt": "fixture", "music_length_ms": 10000}
+    options: dict[str, object] = {"prompt": "fixture", "music_length_ms": 10000}
     options.update(changes)
     with pytest.raises(ValueError):
-        build_music_payload(**options)
+        # The runtime validation boundary deliberately receives values outside its typed contract.
+        Mock(wraps=build_music_payload)(**options)
 
 
 @pytest.mark.parametrize("output_format", ["pcm_24000", "opus_48000_128", "ulaw_8000", "alaw_8000", "invalid"])
-def test_undecodable_output_format_is_rejected_before_credentials(monkeypatch, output_format):
+def test_undecodable_output_format_is_rejected_before_credentials(
+    monkeypatch: pytest.MonkeyPatch, output_format: str
+) -> None:
     """Reject codecs the MP3 decoder cannot replay before loading credentials."""
     import dj_reachy.profiles.dj_reachy.make_song_and_dance as music
 
-    def no_key(*_args):
+    def no_key(*_args: object) -> str:
         raise AssertionError("Unsupported formats must fail before loading credentials")
 
     monkeypatch.setattr(music, "_get_elevenlabs_key", no_key)

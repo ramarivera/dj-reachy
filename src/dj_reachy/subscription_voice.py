@@ -1,23 +1,27 @@
-"""ChatGPT subscription Live adapter using an explicitly configured broker.
+"""Subscription-only ChatGPT Live transport, with host-side credential isolation.
 
-The broker owns Codex credentials and confirms subscription billing before it
-returns WebRTC SDP. This client never falls back to API-key Realtime.
+Consumer dialect and media are adapted from pinned Conduit sources. See
+``static/conduit-voice-NOTICE.txt``. This is not the public Realtime tool protocol.
 """
 
 from __future__ import annotations
-
-import asyncio
-import base64
-import json
 import os
 import re
-import time
-from collections import deque
+import json
+import base64
+import asyncio
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Callable, Awaitable
+from collections import deque
 from urllib.parse import urlparse
 
-import requests
+import av
+import httpx
+from aiortc import RTCConfiguration, RTCPeerConnection, RTCSessionDescription
+from aiortc.mediastreams import MediaStreamError
+
+from dj_reachy.voice_media import MicrophoneTrack
+
 
 BROKER_URL_ENV = "DJ_REACHY_SUBSCRIPTION_BROKER_URL"
 BROKER_TOKEN_ENV = "DJ_REACHY_SUBSCRIPTION_BROKER_TOKEN"
@@ -26,41 +30,103 @@ DEFAULT_MODEL = "gpt-live-1-codex"
 DEFAULT_VOICE = "cove"
 CHANNEL = "oai-events"
 MAX_CONTEXT_BYTES = 500
+MAX_BODY = 256 * 1024
+Signal = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 
 
 def require_subscription_broker() -> tuple[str, str]:
-    """Return a validated broker endpoint and scoped broker credential."""
+    """Validate the session endpoint and scoped credential, never provider OAuth."""
     url = os.environ.get(BROKER_URL_ENV, "").strip()
     token = os.environ.get(BROKER_TOKEN_ENV, "").strip()
     parsed = urlparse(url)
-    if parsed.scheme not in ("https", "http") or not parsed.hostname or parsed.username or parsed.password:
+    if (
+        parsed.scheme not in ("https", "http")
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+        or any(c.isspace() for c in url)
+    ):
         raise RuntimeError(f"Subscription voice needs an authenticated broker URL in {BROKER_URL_ENV}.")
     if parsed.scheme != "https" and parsed.hostname not in ("127.0.0.1", "localhost", "::1"):
         raise RuntimeError("Subscription broker URL must use HTTPS unless it is loopback.")
-    if not token or any(char in token for char in "\r\n"):
-        raise RuntimeError(f"Subscription voice needs a scoped broker token in {BROKER_TOKEN_ENV}; no API fallback is used.")
+    if not token or not token.isascii() or any(c.isspace() for c in token):
+        raise RuntimeError(
+            f"Subscription voice needs a scoped broker token in {BROKER_TOKEN_ENV}; no API fallback is used."
+        )
     return url, token
 
 
+async def broker_request(body: dict[str, Any], *, operation: str = "session") -> dict[str, Any]:
+    """Call the narrow host interface without redirects, proxies, or unbounded bodies."""
+    url, token = require_subscription_broker()
+    if operation == "plan":
+        url = url.rstrip("/").rsplit("/", 1)[0] + "/plan"
+    elif operation != "session":
+        raise ValueError("Unknown broker operation")
+    data = json.dumps(body).encode()
+    if len(data) > MAX_BODY:
+        raise ValueError("Broker request exceeds size limit")
+    try:
+        async with httpx.AsyncClient(trust_env=False, timeout=40, follow_redirects=False) as client:
+            async with client.stream(
+                "POST",
+                url,
+                content=data,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                },
+            ) as response:
+                raw = bytearray()
+                async for chunk in response.aiter_bytes():
+                    raw.extend(chunk)
+                    if len(raw) > MAX_BODY:
+                        raise RuntimeError("Subscription broker response exceeds size limit")
+                if not 200 <= response.status_code < 300:
+                    try:
+                        rejected = json.loads(raw)
+                    except ValueError:
+                        rejected = {}
+                    detail = rejected.get("error") if isinstance(rejected, dict) else None
+                    detail = (
+                        detail.replace(token, "[redacted]")
+                        if isinstance(detail, str) and len(detail) <= 2000
+                        else "No safe diagnosis returned"
+                    )
+                    raise RuntimeError(
+                        f"Subscription broker refused {operation} (HTTP {response.status_code}): {detail}. No API fallback was used."
+                    )
+                result = json.loads(raw)
+    except (httpx.HTTPError, ValueError):
+        raise RuntimeError("Subscription broker connection failed; no API fallback was used.") from None
+    if not isinstance(result, dict) or result.get("ok") is not True or result.get("auth") != "subscription":
+        raise RuntimeError("Broker did not confirm subscription billing; no API fallback was used.")
+    return result
+
+
 def _utf8_chunks(text: str, limit: int = MAX_CONTEXT_BYTES) -> list[str]:
-    text = text.strip()
+    if limit < 4:
+        raise ValueError("UTF-8 chunk limit must accommodate a Unicode scalar")
     chunks: list[str] = []
-    current = ""
+    current: list[str] = []
     size = 0
-    for char in text:
+    for char in text.strip():
         n = len(char.encode("utf-8"))
-        if size + n > limit and current:
-            chunks.append(current)
-            current = ""
+        if size + n > limit:
+            chunks.append("".join(current))
+            current = []
             size = 0
-        current += char
+        current.append(char)
         size += n
     if current:
-        chunks.append(current)
+        chunks.append("".join(current))
     return chunks
 
 
 def build_context_messages(text: str, *, channel: str, delegation_id: str | None = None) -> list[dict[str, Any]]:
+    """Encode exact Codex context appends, each bounded by 500 UTF-8 bytes."""
     if channel not in ("speakable", "commentary"):
         raise ValueError("context channel must be speakable or commentary")
     messages = []
@@ -76,234 +142,299 @@ def build_context_messages(text: str, *, channel: str, delegation_id: str | None
     return messages
 
 
-def plan_delegation(event_text: str, transcript: str) -> tuple[str, dict[str, Any]] | None:
-    """Map a delegation to one bounded app command using transcript context."""
-    text = (event_text or transcript).strip()
-    if not text:
-        text = transcript.strip()
-    normalized = text.lower()
-    if re.search(r"\b(pause|hold)\b.*\b(music|song|track)\b|\b(pause|hold)\b", normalized):
-        return "pause_music", {}
-    if re.search(r"\b(resume|continue|unpause)\b.*\b(music|song|track)\b|\b(resume|unpause)\b", normalized):
-        return "resume_music", {}
-    if re.search(r"\b(stop|cancel)\b.*\b(music|song|track|generation)\b|\bstop\b", normalized):
-        return "stop_music", {}
-    if re.search(r"\b(make|create|generate|compose)\b.*\b(song|music|track)\b", normalized):
-        return "make_song_and_dance", {"prompt": text[:2000], "music_length_ms": 30000}
-    if re.search(r"\b(dance|move|perform)\b", normalized):
-        return "dance", {}
-    return None
+def fast_control(text: str) -> str | None:
+    """Recognize only complete immediate control commands, never historical substrings."""
+    match = re.fullmatch(
+        r"(?:please\s+)?(stop|cancel|pause|resume|unpause)(?:\s+(?:the\s+)?(?:music|song|track|generation))?"
+        r"(?:\s+(?:now|please))?[.!?]*",
+        text.strip(),
+        re.IGNORECASE,
+    )
+    if match is None:
+        return None
+    return {
+        "stop": "stop_music",
+        "cancel": "stop_music",
+        "pause": "pause_music",
+        "resume": "resume_music",
+        "unpause": "resume_music",
+    }[match[1].lower()]
 
 
 class SubscriptionRealtimeAdapter:
-    """A broker-signaled WebRTC client compatible with this app handler's realtime ports."""
+    """Replaceable consumer transport. Each connection owns fresh media and turn state."""
 
-    def __init__(self, *, model: str = DEFAULT_MODEL, voice: str = DEFAULT_VOICE, instructions: str = ""):
+    def __init__(
+        self,
+        *,
+        model: str = DEFAULT_MODEL,
+        voice: str = DEFAULT_VOICE,
+        instructions: str = "",
+        signal: Signal | None = None,
+        ready_timeout: float = 20,
+    ):
+        """Inject signaling for loopback qualification; production uses the scoped broker."""
         self.model = model or DEFAULT_MODEL
         self.voice = voice or DEFAULT_VOICE
         self.instructions = instructions
+        self.signal = signal or broker_request
+        self.ready_timeout = ready_timeout
         self.realtime = SimpleNamespace(connect=self.connect)
 
-    def connect(self, **_kwargs: Any) -> "SubscriptionRealtimeConnection":
+    def connect(self, **_kwargs: Any) -> SubscriptionRealtimeConnection:
+        """Create a new session rather than reusing closed peer state."""
         return SubscriptionRealtimeConnection(self)
 
 
 class SubscriptionRealtimeConnection:
+    """WebRTC media and consumer events with bounded pending sends and deterministic close."""
+
     def __init__(self, adapter: SubscriptionRealtimeAdapter):
+        """Initialize without reading credentials or opening a socket."""
         self.adapter = adapter
-        self._events: asyncio.Queue[Any] = asyncio.Queue()
-        self._mic_chunks: deque[bytes] = deque()
-        self._mic_size = 0
+        self._events: asyncio.Queue[Any] = asyncio.Queue(maxsize=256)
+        self._audio_events: asyncio.Queue[Any] = asyncio.Queue(maxsize=64)
+        self._available = asyncio.Event()
+        self._pending: deque[str] = deque()
         self._audio_readers: list[asyncio.Task[None]] = []
         self._closed = False
         self._user_transcript = ""
-        self._remote_track: Any = None
-        self._microphone: Any = None
+        self._current_input = ""
+        self._turn_id = 0
+        self._consumed_turn = -1
+        self._awaiting_final = False
         self._pc: Any = None
         self._channel: Any = None
-        self.session = SimpleNamespace(update=self._session_update)
+        self._microphone: MicrophoneTrack | None = None
+        self.ready = asyncio.Event()
         self.input_audio_buffer = SimpleNamespace(append=self._append_audio)
-        self.conversation = SimpleNamespace(item=SimpleNamespace(create=self._conversation_item_create))
-        self.response = SimpleNamespace(create=self._response_create, cancel=self._response_cancel)
 
-    async def __aenter__(self) -> "SubscriptionRealtimeConnection":
-        broker_url, broker_token = require_subscription_broker()
+    def _enqueue(self, event: Any) -> None:
+        if getattr(event, "type", None) == "response.audio.delta":
+            if self._audio_events.full():
+                self._audio_events.get_nowait()
+            self._audio_events.put_nowait(event)
+        else:
+            if self._events.full():
+                # Excess control traffic is a protocol failure, never authority to run stale commands.
+                while not self._events.empty():
+                    self._events.get_nowait()
+                event = SimpleNamespace(type="session.closed", reason="event backlog exceeded")
+            self._events.put_nowait(event)
+        self._available.set()
+
+    async def __aenter__(self) -> SubscriptionRealtimeConnection:
+        """Perform exactly one signaling POST and wait for consumer session.started."""
         try:
-            import av
-            from aiortc import RTCConfiguration, RTCPeerConnection, RTCSessionDescription
-            from aiortc.mediastreams import AudioStreamTrack, MediaStreamError
-        except ImportError as exc:
-            raise RuntimeError("Subscription Live requires the installed aiortc and av runtime.") from exc
+            self._pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
+            self._microphone = MicrophoneTrack()
+            self._pc.addTrack(self._microphone)
+            self._channel = self._pc.createDataChannel(CHANNEL)
 
-        owner = self
+            def on_open() -> None:
+                while self.ready.is_set() and self._pending:
+                    self._channel.send(self._pending.popleft())
 
-        class Microphone(AudioStreamTrack):
-            def __init__(self) -> None:
-                super().__init__()
-                self.resampler = av.AudioResampler(format="s16", layout="mono", rate=48000)
-                self.backlog = bytearray()
-                self.timestamp = 0
-                self.started = time.monotonic()
-
-            async def recv(self) -> Any:
-                self.timestamp += 960
-                await asyncio.sleep(max(0.0, self.started + self.timestamp / 48000 - time.monotonic()))
-                while len(self.backlog) < 1920 and owner._mic_chunks:
-                    block = owner._mic_chunks.popleft()
-                    owner._mic_size -= len(block)
-                    samples = len(block) // 2
-                    if samples:
-                        frame = av.AudioFrame(format="s16", layout="mono", samples=samples)
-                        frame.planes[0].update(block[: samples * 2])
-                        frame.sample_rate = 24000
-                        self.backlog.extend(b"".join(bytes(out.planes[0])[: out.samples * 2] for out in self.resampler.resample(frame)))
-                raw = bytes(self.backlog[:1920])
-                del self.backlog[: len(raw)]
-                frame = av.AudioFrame(format="s16", layout="mono", samples=960)
-                frame.planes[0].update(raw.ljust(1920, b"\0"))
-                frame.pts = self.timestamp
-                frame.sample_rate = 48000
-                frame.time_base = __import__("fractions").Fraction(1, 48000)
-                return frame
-
-        self._pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
-        self._microphone = Microphone()
-        self._pc.addTrack(self._microphone)
-        self._channel = self._pc.createDataChannel(CHANNEL)
-
-        @self._channel.on("message")
-        def on_message(message: Any) -> None:
-            if isinstance(message, str):
+            def on_message(message: Any) -> None:
+                if not isinstance(message, str) or len(message.encode()) > MAX_BODY:
+                    return
                 try:
                     obj = json.loads(message)
-                    if isinstance(obj, dict) and isinstance(obj.get("type"), str):
-                        self._events.put_nowait(SimpleNamespace(**obj))
-                except (json.JSONDecodeError, TypeError):
+                except ValueError:
                     return
+                if not isinstance(obj, dict) or not isinstance(obj.get("type"), str):
+                    return
+                if obj["type"] in ("session.started", "session.updated"):
+                    self.ready.set()
+                    on_open()
+                self._enqueue(SimpleNamespace(**obj))
 
-        @self._pc.on("track")
-        def on_track(track: Any) -> None:
-            if track.kind == "audio":
-                self._audio_readers.append(asyncio.create_task(self._read_remote_audio(track, av, MediaStreamError)))
-        @self._channel.on("close")
-        def on_channel_close() -> None:
-            self._events.put_nowait(SimpleNamespace(type="session.closed"))
+            def on_track(track: Any) -> None:
+                if track.kind == "audio":
+                    self._audio_readers.append(
+                        asyncio.create_task(self._read_remote_audio(track, av, MediaStreamError))
+                    )
 
-        await self._pc.setLocalDescription(await self._pc.createOffer())
-        offer = self._pc.localDescription.sdp
-        try:
-            response = await asyncio.to_thread(
-                requests.post,
-                broker_url,
-                json={"sdp": offer, "billing": "subscription", "voice": self.adapter.voice,
-                      "briefing": self.adapter.instructions},
-                headers={"Authorization": f"Bearer {broker_token}", "Content-Type": "application/json"},
-                timeout=35,
+            def on_close() -> None:
+                if not self._closed:
+                    self._enqueue(SimpleNamespace(type="session.closed"))
+
+            def on_state() -> None:
+                if not self._closed and self._pc.connectionState == "failed":
+                    self._enqueue(SimpleNamespace(type="session.closed"))
+
+            self._channel.on("open", on_open)
+            self._channel.on("message", on_message)
+            self._channel.on("close", on_close)
+            self._pc.on("track", on_track)
+            self._pc.on("connectionstatechange", on_state)
+
+            await self._pc.setLocalDescription(await self._pc.createOffer())
+            body = await self.adapter.signal(
+                {
+                    "sdp": self._pc.localDescription.sdp,
+                    "billing": "subscription",
+                    "model": self.adapter.model,
+                    "voice": self.adapter.voice,
+                    "briefing": self.adapter.instructions,
+                }
             )
-            if response.status_code < 200 or response.status_code >= 300:
-                raise RuntimeError(f"Subscription broker refused the session (HTTP {response.status_code}); no API fallback was used.")
-            body = response.json()
-            if not isinstance(body, dict) or body.get("ok") is not True or body.get("auth") != "subscription":
+            if body.get("ok") is not True or body.get("auth") != "subscription":
                 raise RuntimeError("Broker did not confirm subscription billing; no API fallback was used.")
             transport = body.get("transport")
-            if not isinstance(transport, dict) or transport.get("type") != "webrtc" or not str(transport.get("sdp", "")).startswith("v=0"):
+            if (
+                not isinstance(transport, dict)
+                or transport.get("type") != "webrtc"
+                or not isinstance(transport.get("sdp"), str)
+                or not transport["sdp"].startswith("v=0")
+                or len(transport["sdp"].encode()) > 65536
+            ):
                 raise RuntimeError("Subscription broker returned an invalid WebRTC answer.")
             await self._pc.setRemoteDescription(RTCSessionDescription(sdp=transport["sdp"], type="answer"))
+            await asyncio.wait_for(self.ready.wait(), self.adapter.ready_timeout)
             return self
-        except (requests.RequestException, ValueError) as exc:
-            await self.close()
-            raise RuntimeError(f"Subscription broker connection failed ({type(exc).__name__}); no API fallback was used.") from None
-        except Exception:
+        except BaseException:
             await self.close()
             raise
 
-    async def _read_remote_audio(self, track: Any, av: Any, media_stream_error: type) -> None:
+    async def _read_remote_audio(self, track: Any, av: Any, media_stream_error: type[Exception]) -> None:
         resampler = av.AudioResampler(format="s16", layout="mono", rate=24000)
         try:
             while not self._closed:
                 frame = await track.recv()
                 for converted in resampler.resample(frame):
-                    pcm = b"".join(bytes(converted.planes[0])[: converted.samples * 2])
+                    pcm = bytes(converted.planes[0])[: converted.samples * 2]
                     if pcm:
-                        event = SimpleNamespace(type="response.audio.delta", delta=base64.b64encode(pcm).decode("ascii"))
-                        await self._events.put(event)
+                        self._enqueue(
+                            SimpleNamespace(type="response.audio.delta", delta=base64.b64encode(pcm).decode("ascii"))
+                        )
         except media_stream_error:
             return
         except asyncio.CancelledError:
             raise
         except Exception:
-            await self._events.put(SimpleNamespace(type="error", error=SimpleNamespace(code="webrtc_audio", message="Subscription audio stream ended.")))
-
-    async def _session_update(self, **_kwargs: Any) -> None:
-        return None
-
-    async def _conversation_item_create(self, *, item: dict[str, Any]) -> None:
-        content = item.get("content", [])
-        text = " ".join(str(part.get("text", "")) for part in content if isinstance(part, dict))
-        await self.send_context(text, "commentary")
-
-    async def _response_create(self, *, response: dict[str, Any]) -> None:
-        await self.send_event({"type": "response.create", "response": response})
-
-    async def _response_cancel(self, **_kwargs: Any) -> None:
-        await self.send_event({"type": "response.cancel"})
+            self._enqueue(
+                SimpleNamespace(
+                    type="error", error={"code": "webrtc_audio", "message": "Subscription audio stream ended."}
+                )
+            )
 
     async def _append_audio(self, *, audio: str) -> None:
-        pcm = base64.b64decode(audio)
-        self._mic_chunks.append(pcm)
-        self._mic_size += len(pcm)
-        max_bytes = 24000 * 2 * 2
-        while self._mic_size > max_bytes and self._mic_chunks:
-            self._mic_size -= len(self._mic_chunks.popleft())
+        if self._microphone is not None and not self._closed:
+            self._microphone.feed(base64.b64decode(audio, validate=True))
 
     async def send_event(self, message: dict[str, Any]) -> None:
-        if self._channel is None or self._channel.readyState != "open":
-            return
-        self._channel.send(json.dumps(message, ensure_ascii=False, separators=(",", ":")))
+        """Queue pre-open sends, failing explicitly rather than dropping context."""
+        if self._closed:
+            raise ConnectionError("Subscription session is closed")
+        text = json.dumps(message, ensure_ascii=False, separators=(",", ":"))
+        if self.ready.is_set() and self._channel is not None and self._channel.readyState == "open":
+            self._channel.send(text)
+        elif len(self._pending) < 64:
+            self._pending.append(text)
+        else:
+            raise BufferError("Subscription pending context queue is full")
 
     async def send_context(self, text: str, channel: str, delegation_id: str | None = None) -> None:
+        """Send quiet or speakable context using the actual consumer dialect."""
         for message in build_context_messages(text, channel=channel, delegation_id=delegation_id):
             await self.send_event(message)
 
+    async def plan(self, transcript: str, history: list[dict[str, Any]]) -> dict[str, Any]:
+        """Ask only the trusted host's subscription-backed bounded app planner."""
+        return await broker_request(
+            {"billing": "subscription", "transcript": transcript, "history": history}, operation="plan"
+        )
+
     async def close(self) -> None:
+        """End the consumer session, all reader tasks, media and queued input."""
         if self._closed:
             return
+        if self._channel is not None and self._channel.readyState == "open":
+            self._channel.send(json.dumps({"type": "session.close"}))
         self._closed = True
+        self.ready.clear()
         for task in self._audio_readers:
             task.cancel()
         await asyncio.gather(*self._audio_readers, return_exceptions=True)
+        if self._microphone is not None:
+            self._microphone.stop()
         if self._pc is not None:
             await self._pc.close()
-        await self._events.put(None)
+        self._pending.clear()
+        for queue in (self._events, self._audio_events):
+            while not queue.empty():
+                queue.get_nowait()
+        self._enqueue(None)
 
     async def __aexit__(self, *_args: Any) -> None:
+        """Close on normal exit as well as exceptions."""
         await self.close()
-    def __aiter__(self) -> "SubscriptionRealtimeConnection":
+
+    def __aiter__(self) -> SubscriptionRealtimeConnection:
+        """Iterate decoded consumer events and resampled PCM."""
         return self
 
     async def __anext__(self) -> Any:
-        event = await self._events.get()
+        """Attach only the current unconsumed user turn to a delegation."""
+        while self._events.empty() and self._audio_events.empty():
+            if self._closed:
+                raise StopAsyncIteration
+            self._available.clear()
+            await self._available.wait()
+        event = self._events.get_nowait() if not self._events.empty() else self._audio_events.get_nowait()
         if event is None:
             raise StopAsyncIteration
-        event_type = getattr(event, "type", None)
-        if event_type == "session.closed":
+        kind = event.type
+        if kind == "session.closed":
             raise ConnectionError("Subscription Live session closed.")
-        if event_type == "input_transcript.added":
-            text = self._transcript(event)
-            self._user_transcript = (self._user_transcript + " " + text).strip()[-6000:]
-        if event_type == "turn.done":
+        if kind == "input_transcript.added":
+            if not self._current_input:
+                self._turn_id += 1
+                self._awaiting_final = True
+            self._current_input = (self._current_input + self._transcript(event))[-6000:]
+            self._user_transcript = self._current_input
+        elif kind == "turn.done":
             turn = getattr(event, "turn", {})
-            role = turn.get("role") if isinstance(turn, dict) else getattr(turn, "role", None)
-            transcript = turn.get("transcript") if isinstance(turn, dict) else getattr(turn, "transcript", "")
-            if role == "user" and isinstance(transcript, str):
-                self._user_transcript = transcript[-6000:]
-        if event_type == "delegation.created":
-            event.transcript_context = self._user_transcript
+            if isinstance(turn, dict) and turn.get("role") == "user" and isinstance(turn.get("transcript"), str):
+                if not self._awaiting_final:
+                    self._turn_id += 1
+                self._user_transcript = turn["transcript"][-6000:]
+                self._current_input = ""
+                self._awaiting_final = False
+        elif kind == "delegation.created":
+            event.transcript_context = self._user_transcript if self._consumed_turn != self._turn_id else ""
+            self._consumed_turn = self._turn_id
+            self._current_input = ""
+        event.turn_id = self._turn_id
         return event
 
     @staticmethod
     def _transcript(event: Any) -> str:
         item = getattr(event, "item", {})
-        if isinstance(item, dict):
-            return str(item.get("text") or "")
-        return str(getattr(event, "text", "") or "")
+        return str(item.get("text", "")) if isinstance(item, dict) else ""
+
+
+async def qualify_subscription() -> dict[str, Any]:
+    """One headless consumer handshake, no recording, speaker, greeting or retry."""
+    async with SubscriptionRealtimeAdapter(
+        instructions="Wait silently for the user. Do not greet or delegate."
+    ).connect() as connection:
+        return {
+            "ok": connection.ready.is_set(),
+            "auth": "subscription",
+            "handshakes": 1,
+            "recording": False,
+            "playback": False,
+        }
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="One silent subscription Live handshake; may consume account entitlement."
+    )
+    parser.add_argument("--qualify", action="store_true", required=True)
+    parser.parse_args()
+    print(json.dumps(asyncio.run(qualify_subscription())))

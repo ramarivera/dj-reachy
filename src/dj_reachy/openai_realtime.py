@@ -1,14 +1,15 @@
+"""App voice handler with independent, correlated and cancellable tool ownership."""
+
+from __future__ import annotations
 import json
 import base64
-import random
 import asyncio
 import logging
-from typing import Any, Final, Tuple, Literal, Optional
+from time import monotonic
+from typing import Any, Final, Literal, Protocol, cast
 from datetime import datetime
 
-import cv2
 import numpy as np
-import gradio as gr
 from openai import AsyncOpenAI
 from fastrtc import AdditionalOutputs, AsyncStreamHandler, wait_for_item, audio_to_int16
 from numpy.typing import NDArray
@@ -17,799 +18,597 @@ from websockets.exceptions import ConnectionClosedError
 
 from dj_reachy.config import config
 from dj_reachy.prompts import get_session_voice, get_session_instructions
-from dj_reachy.tools.core_tools import (
-    ToolDependencies,
-    get_tool_specs,
-    dispatch_tool_call,
-)
+from dj_reachy.tools.core_tools import ToolDependencies, get_tool_specs, dispatch_tool_call
+from dj_reachy.subscription_voice import SubscriptionRealtimeAdapter, fast_control
 
 
 logger = logging.getLogger(__name__)
-
 OPEN_AI_INPUT_SAMPLE_RATE: Final[Literal[24000]] = 24000
 OPEN_AI_OUTPUT_SAMPLE_RATE: Final[Literal[24000]] = 24000
+SONG_TOOLS = {"make_song_and_dance", "play_saved_song"}
+CONTROL_TOOLS = {"pause_music", "resume_music", "stop_music"}
+
+
+class VoiceConfiguration(Protocol):
+    """Typed view of the fields config initializes from persisted runtime settings."""
+
+    VOICE_BACKEND: str
+    VOICE_MODEL: str
+    VOICE_NAME: str
+    CONVERSATION_LANGUAGE: str
+
+
+voice_config = cast(VoiceConfiguration, config)
 
 
 class OpenaiRealtimeHandler(AsyncStreamHandler):
-    """An OpenAI realtime handler for fastrtc Stream."""
+    """Keep the voice receiver live while independently owned app tasks execute."""
 
-    def __init__(self, deps: ToolDependencies, gradio_mode: bool = False, instance_path: Optional[str] = None):
-        """Initialize the handler."""
-        super().__init__(
-            expected_layout="mono",
-            output_sample_rate=OPEN_AI_OUTPUT_SAMPLE_RATE,
-            input_sample_rate=OPEN_AI_INPUT_SAMPLE_RATE,
-        )
-
-        # Override typing of the sample rates to match OpenAI's requirements
-        self.output_sample_rate: Literal[24000] = self.output_sample_rate
-        self.input_sample_rate: Literal[24000] = self.input_sample_rate
-
+    def __init__(self, deps: ToolDependencies, gradio_mode: bool = False, instance_path: str | None = None):
+        """Initialize lifecycle state without opening providers or hardware."""
+        super().__init__(expected_layout="mono", output_sample_rate=24000, input_sample_rate=24000)
         self.deps = deps
-
-        # Override type annotations for OpenAI strict typing (only for values used in API)
-        self.output_sample_rate = OPEN_AI_OUTPUT_SAMPLE_RATE
-        self.input_sample_rate = OPEN_AI_INPUT_SAMPLE_RATE
-
-        self.connection: Any = None
-        self.output_queue: "asyncio.Queue[Tuple[int, NDArray[np.int16]] | AdditionalOutputs]" = asyncio.Queue()
-
-        self.last_activity_time = asyncio.get_event_loop().time()
-        self.start_time = asyncio.get_event_loop().time()
-        self.is_idle_tool_call = False
         self.gradio_mode = gradio_mode
         self.instance_path = instance_path
-
-        # Debouncing for partial transcripts
-        self.partial_transcript_task: asyncio.Task[None] | None = None
-        self.partial_transcript_sequence: int = 0  # sequence counter to prevent stale emissions
-        self.partial_debounce_delay = 0.5  # seconds
-
-        # Internal lifecycle flags
-        self._shutdown_requested: bool = False
-        self._connected_event: asyncio.Event = asyncio.Event()
-
-        # Muting flag for external audio playback (e.g., songs)
-        self._mute_output_audio: bool = False
-
-        # Event for waiting on triggered responses to complete
-        self._response_done_event: asyncio.Event = asyncio.Event()
-        self._waiting_for_response: bool = False
-
-        self._tool_tasks: dict[str, asyncio.Task[None]] = {}
-        self._music_call_active = False
+        self.connection: Any = None
+        self.client: Any = None
+        self.output_queue: asyncio.Queue[tuple[int, NDArray[np.int16]] | AdditionalOutputs] = asyncio.Queue()
+        self.last_activity_time = monotonic()
+        self.start_time = self.last_activity_time
+        self.is_idle_tool_call = False
+        self._shutdown_requested = False
+        self._connected_event = asyncio.Event()
+        self._mute_output_audio = False
         self._audio_mute_owner: str | None = None
+        self._response_done_event = asyncio.Event()
+        self._waiting_for_response = False
+        self._tool_tasks: dict[str, asyncio.Task[None]] = {}
         self._subscription_tasks: dict[str, asyncio.Task[None]] = {}
+        self._work_tasks: set[asyncio.Task[None]] = set()
+        self._seen_calls: set[str] = set()
+        self._seen_delegations: set[str] = set()
+        self._delegated_turns: set[int] = set()
+        self._turn_controls: dict[int, asyncio.Task[dict[str, Any]]] = {}
+        self._control_tasks: set[asyncio.Task[dict[str, Any]]] = set()
+        self._song_task: asyncio.Task[Any] | None = None
+        self._music_call_active = False
+        self._work_epoch = 0
+        self._stop_barrier: asyncio.Task[dict[str, Any]] | None = None
+        self._supervisor: asyncio.Task[Any] | None = None
+        self._restart_requested = False
 
-    def schedule_tool_call(self, tool_name: str, args_json: str, call_id: str) -> asyncio.Task[None]:
-        """Run a tool independently from event reception and retain its result correlation."""
-        existing = self._tool_tasks.get(call_id)
-        if existing is not None:
-            return existing
-        task = asyncio.create_task(self._run_tool_call(tool_name, args_json, call_id), name=f"tool-{call_id}")
-        self._tool_tasks[call_id] = task
-        task.add_done_callback(lambda _task: self._tool_tasks.pop(call_id, None))
-        return task
-
-    async def _run_tool_call(self, tool_name: str, args_json: str, call_id: str) -> None:
-        connection = self.connection
-        if tool_name == "make_song_and_dance" and self._music_call_active:
-            result: dict[str, Any] = {"status": "busy", "message": "A song is already generating or playing."}
-        else:
-            if tool_name == "make_song_and_dance":
-                self._music_call_active = True
-            try:
-                result = await dispatch_tool_call(tool_name, args_json, self.deps)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                result = {"error": f"{type(exc).__name__}: {exc}"}
-            finally:
-                if tool_name == "make_song_and_dance":
-                    self._music_call_active = False
-        if connection is None or self.connection is not connection or self._shutdown_requested:
-            return
-        await connection.conversation.item.create(
-            item={"type": "function_call_output", "call_id": call_id, "output": json.dumps(result)}
-        )
-        await self.output_queue.put(
-            AdditionalOutputs(
-                {"role": "assistant", "content": json.dumps(result),
-                 "metadata": {"title": f"🛠️ Used tool {tool_name}", "status": "done"}}
-            )
-        )
-        if not self.is_idle_tool_call:
-            await connection.response.create(
-                response={"instructions": "Use the tool result just returned and answer concisely."}
-            )
-        else:
-            self.is_idle_tool_call = False
-        if self.deps.head_wobbler is not None:
-            self.deps.head_wobbler.reset()
-    def schedule_subscription_delegation(self, event: Any) -> None:
-        """Run one correlated subscription delegation without blocking event reception."""
-        item = getattr(event, "item", {})
-        if isinstance(item, dict):
-            delegation_id = item.get("id") or item.get("delegation_item_id")
-            content = item.get("content", [])
-            event_text = " ".join(str(part.get("text", "")) for part in content if isinstance(part, dict))
-            event_text = event_text or str(item.get("text") or "")
-        else:
-            delegation_id = getattr(item, "id", None)
-            event_text = str(getattr(item, "text", "") or "")
-        if not isinstance(delegation_id, str) or not delegation_id:
-            delegation_id = getattr(event, "delegation_item_id", None)
-        if not isinstance(delegation_id, str) or not delegation_id or delegation_id in self._subscription_tasks:
-            return
-        transcript = str(getattr(event, "transcript_context", "") or "")
-        task = asyncio.create_task(
-            self._run_subscription_delegation(delegation_id, event_text, transcript),
-            name=f"delegation-{delegation_id}",
-        )
-        self._subscription_tasks[delegation_id] = task
-        task.add_done_callback(lambda _task: self._subscription_tasks.pop(delegation_id, None))
-
-    async def _run_subscription_delegation(self, delegation_id: str, event_text: str, transcript: str) -> None:
-        connection = self.connection
-        if connection is None or not hasattr(connection, "send_context"):
-            return
-        from dj_reachy.subscription_voice import plan_delegation
-        action = plan_delegation(event_text, transcript)
-        if action is None:
-            spoken = "I can control music and dance, but I couldn't map that request to an app command."
-        else:
-            tool_name, arguments = action
-            if tool_name == "make_song_and_dance" and self._music_call_active:
-                result: dict[str, Any] = {"status": "busy"}
-            else:
-                if tool_name == "make_song_and_dance":
-                    self._music_call_active = True
-                await connection.send_context("Working on that now.", "commentary", delegation_id)
-                try:
-                    result = await dispatch_tool_call(tool_name, json.dumps(arguments), self.deps)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    result = {"error": type(exc).__name__}
-                finally:
-                    if tool_name == "make_song_and_dance":
-                        self._music_call_active = False
-            status = str(result.get("status") or "")
-            if status in ("completed", "saved"):
-                spoken = "Done. The track finished."
-            elif status == "paused":
-                spoken = "The music is paused."
-            elif status == "resumed":
-                spoken = "The music resumed."
-            elif status == "busy":
-                spoken = "A track is already generating or playing."
-            elif status == "cancelled":
-                spoken = str(result.get("message") or "Local work stopped. The provider job may have continued.")
-            elif status == "stopped":
-                spoken = "Music stopped."
-            elif status in ("not_playing", "not_paused"):
-                spoken = "There isn't active music to control."
-            elif "error" in result:
-                spoken = "That app command failed."
-            else:
-                spoken = f"Done: {status or 'command completed'}."
-        if self.connection is connection and not self._shutdown_requested:
-            await connection.send_context(spoken, "speakable", delegation_id)
-
-    def copy(self) -> "OpenaiRealtimeHandler":
-        """Create a copy of the handler."""
+    def copy(self) -> OpenaiRealtimeHandler:
+        """Create a fresh connection owner sharing only injected app dependencies."""
         return OpenaiRealtimeHandler(self.deps, self.gradio_mode, self.instance_path)
 
     def mute_output_audio(self, owner: str = "external") -> None:
-        """Mute assistant audio for one playback owner."""
+        """Mute assistant PCM for exactly one playback owner."""
         self._audio_mute_owner = owner
         self._mute_output_audio = True
 
     def unmute_output_audio(self, owner: str = "external") -> None:
-        """Release only the matching playback owner's mute."""
+        """Never let an old playback task unmute its replacement."""
         if self._audio_mute_owner == owner:
             self._audio_mute_owner = None
             self._mute_output_audio = False
 
-    async def apply_personality(self, profile: str | None) -> str:
-        """Apply a new personality (profile) at runtime if possible.
+    def _current(self, connection: Any, epoch: int) -> bool:
+        return self.connection is connection and not self._shutdown_requested and self._work_epoch == epoch
 
-        - Updates the global config's selected profile for subsequent calls.
-        - If a realtime connection is active, sends a session.update with the
-          freshly resolved instructions so the change takes effect immediately.
-
-        Returns a short status message for UI feedback.
-        """
+    async def _dispatch(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         try:
-            # Update the in-process config value and env
-            from dj_reachy.config import config as _config
-            from dj_reachy.config import set_custom_profile
-
-            set_custom_profile(profile)
-            logger.info(
-                "Set custom profile to %r (config=%r)", profile, getattr(_config, "REACHY_MINI_CUSTOM_PROFILE", None)
-            )
-
-            try:
-                instructions = get_session_instructions()
-                voice = get_session_voice()
-            except BaseException as e:  # catch SystemExit from prompt loader without crashing
-                logger.error("Failed to resolve personality content: %s", e)
-                return f"Failed to apply personality: {e}"
-
-            # Attempt a live update first, then force a full restart to ensure it sticks
-            if self.connection is not None:
-                try:
-                    await self.connection.session.update(
-                        session={
-                            "type": "realtime",
-                            "instructions": instructions,
-                            "audio": {"output": {"voice": voice}},
-                        },
-                    )
-                    logger.info("Applied personality via live update: %s", profile or "built-in default")
-                except Exception as e:
-                    logger.warning("Live update failed; will restart session: %s", e)
-
-                # Force a real restart to guarantee the new instructions/voice
-                try:
-                    await self._restart_session()
-                    return "Applied personality and restarted realtime session."
-                except Exception as e:
-                    logger.warning("Failed to restart session after apply: %s", e)
-                    return "Applied personality. Will take effect on next connection."
-            else:
-                logger.info(
-                    "Applied personality recorded: %s (no live connection; will apply on next session)",
-                    profile or "built-in default",
-                )
-                return "Applied personality. Will take effect on next connection."
-        except Exception as e:
-            logger.error("Error applying personality '%s': %s", profile, e)
-            return f"Failed to apply personality: {e}"
-
-    async def _emit_debounced_partial(self, transcript: str, sequence: int) -> None:
-        """Emit partial transcript after debounce delay."""
-        try:
-            await asyncio.sleep(self.partial_debounce_delay)
-            # Only emit if this is still the latest partial (by sequence number)
-            if self.partial_transcript_sequence == sequence:
-                await self.output_queue.put(AdditionalOutputs({"role": "user_partial", "content": transcript}))
-                logger.debug(f"Debounced partial emitted: {transcript}")
+            return await dispatch_tool_call(name, json.dumps(args), self.deps)
         except asyncio.CancelledError:
-            logger.debug("Debounced partial cancelled")
             raise
+        except Exception as exc:
+            # Provider exceptions can echo credentials. Only the class crosses the voice boundary.
+            return {"error": type(exc).__name__, "message": "App command failed; no automatic retry was made."}
+
+    def _stop_work(self) -> asyncio.Task[dict[str, Any]]:
+        """Invalidate planner/generation work synchronously before scheduling local stop."""
+        self._work_epoch += 1
+        current = asyncio.current_task()
+        obsolete = [task for task in self._work_tasks if task is not current and not task.done()]
+        for task in obsolete:
+            task.cancel()
+        previous = self._stop_barrier
+
+        async def stop() -> dict[str, Any]:
+            if previous is not None and not previous.done():
+                await asyncio.shield(previous)
+            result = await self._dispatch("stop_music", {})
+            await asyncio.gather(*obsolete, return_exceptions=True)
+            return {
+                **result,
+                "local_cancellation": True,
+                "provider_cancellation": "unconfirmed; a paid provider job may have continued",
+            }
+
+        stop_task = asyncio.create_task(stop(), name="voice-stop-music")
+        self._stop_barrier = stop_task
+        self._control_tasks.add(stop_task)
+        stop_task.add_done_callback(self._control_tasks.discard)
+        return stop_task
+
+    async def _execute(self, name: str, args: dict[str, Any], connection: Any, epoch: int) -> dict[str, Any]:
+        if not self._current(connection, epoch):
+            raise asyncio.CancelledError
+        if name == "stop_music":
+            return await asyncio.shield(self._stop_work())
+        if name in SONG_TOOLS:
+            if self._stop_barrier is not None:
+                await asyncio.shield(self._stop_barrier)
+            if not self._current(connection, epoch):
+                raise asyncio.CancelledError
+            if self._song_task is not None and not self._song_task.done():
+                return {"status": "busy", "message": "A song is already generating or playing."}
+            owner = asyncio.current_task()
+            self._song_task = owner
+            self._music_call_active = True
+            try:
+                return await self._dispatch(name, args)
+            finally:
+                if self._song_task is owner:
+                    self._song_task = None
+                    self._music_call_active = False
+        return await self._dispatch(name, args)
+
+    def schedule_tool_call(self, tool_name: str, args_json: str, call_id: str) -> asyncio.Task[None]:
+        """Run API Realtime function calls independently and dedupe completed IDs."""
+        existing = self._tool_tasks.get(call_id)
+        if existing is not None:
+            return existing
+        duplicate = call_id in self._seen_calls
+        self._seen_calls.add(call_id)
+        stop = self._stop_work() if tool_name == "stop_music" and not duplicate else None
+        task = asyncio.create_task(
+            self._run_tool_call(tool_name, args_json, call_id, duplicate, stop), name=f"tool-{call_id}"
+        )
+        self._tool_tasks[call_id] = task
+        if tool_name not in CONTROL_TOOLS:
+            self._work_tasks.add(task)
+        task.add_done_callback(lambda done: self._tool_tasks.pop(call_id, None))
+        task.add_done_callback(self._work_tasks.discard)
+        return task
+
+    async def _run_tool_call(
+        self,
+        tool_name: str,
+        args_json: str,
+        call_id: str,
+        duplicate: bool = False,
+        stop: asyncio.Task[dict[str, Any]] | None = None,
+    ) -> None:
+        connection, epoch = self.connection, self._work_epoch
+        if duplicate or connection is None:
+            return
+        try:
+            args = json.loads(args_json)
+            if not isinstance(args, dict):
+                raise ValueError
+        except ValueError:
+            result = {"error": "Tool arguments must be a JSON object"}
+        else:
+            result = (
+                await asyncio.shield(stop)
+                if stop is not None
+                else await self._execute(tool_name, args, connection, epoch)
+            )
+        if not self._current(connection, epoch):
+            return
+        await connection.conversation.item.create(
+            item={
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": json.dumps(result),
+            }
+        )
+        await self.output_queue.put(
+            AdditionalOutputs(
+                {
+                    "role": "assistant",
+                    "content": json.dumps(result),
+                    "metadata": {"title": f"Used tool {tool_name}", "status": "done"},
+                }
+            )
+        )
+        if not self.is_idle_tool_call:
+            await connection.response.create(
+                response={"instructions": "Use the correlated tool result and answer concisely."}
+            )
+        self.is_idle_tool_call = False
+        if self.deps.head_wobbler is not None:
+            self.deps.head_wobbler.reset()
+
+    def _control_for_turn(self, turn: int, name: str) -> asyncio.Task[dict[str, Any]]:
+        existing = self._turn_controls.get(turn)
+        if existing is not None:
+            return existing
+        task = (
+            self._stop_work()
+            if name == "stop_music"
+            else asyncio.create_task(self._dispatch(name, {}), name=f"control-{turn}")
+        )
+        self._turn_controls[turn] = task
+        self._control_tasks.add(task)
+        task.add_done_callback(self._control_tasks.discard)
+        return task
+
+    def schedule_subscription_delegation(self, event: Any) -> None:
+        """Own one current user turn per correlated client delegation, never model commentary."""
+        item = getattr(event, "item", {})
+        if not isinstance(item, dict) or item.get("type") != "delegation" or item.get("target") != "client":
+            return
+        identity = item.get("id")
+        if not isinstance(identity, str) or not identity or identity in self._seen_delegations:
+            return
+        self._seen_delegations.add(identity)
+        transcript = str(getattr(event, "transcript_context", "") or "").strip()
+        turn = getattr(event, "turn_id", None)
+        # Delegation content can be absent or a model paraphrase. Only new user words authorize execution.
+        already_handled = isinstance(turn, int) and turn in self._delegated_turns
+        if isinstance(turn, int):
+            self._delegated_turns.add(turn)
+        if already_handled:
+            transcript = ""
+        control = fast_control(transcript)
+        control_task = self._control_for_turn(turn, control) if control and isinstance(turn, int) else None
+        task = asyncio.create_task(
+            self._run_subscription_delegation(identity, transcript, control_task), name=f"delegation-{identity}"
+        )
+        self._subscription_tasks[identity] = task
+        if control is None:
+            self._work_tasks.add(task)
+        task.add_done_callback(lambda done: self._subscription_tasks.pop(identity, None))
+        task.add_done_callback(self._work_tasks.discard)
+
+    async def _run_subscription_delegation(
+        self, identity: str, transcript: str, control_task: asyncio.Task[dict[str, Any]] | None = None
+    ) -> None:
+        connection, epoch = self.connection, self._work_epoch
+        if connection is None:
+            return
+        try:
+            if not transcript:
+                await connection.send_context(
+                    "No new user request. Do not repeat any previous command; ask what the user wants.",
+                    "commentary",
+                    identity,
+                )
+                return
+            if control_task is not None:
+                result = await asyncio.shield(control_task)
+                if self._current(connection, epoch):
+                    await connection.send_context(json.dumps(result), "speakable", identity)
+                return
+            await connection.send_context(
+                "The app is working on the current request. No result yet.", "commentary", identity
+            )
+            history: list[dict[str, Any]] = []
+            seen_calls: set[str] = set()
+            from dj_reachy.voice_planner import MAX_CALLS, MAX_ROUNDS, validate_app_call
+
+            for _round in range(MAX_ROUNDS):
+                step = await connection.plan(transcript, history)
+                if not self._current(connection, epoch):
+                    return
+                calls = step.get("calls")
+                output = step.get("output")
+                if not isinstance(calls, list) or not isinstance(output, list):
+                    raise ValueError("Invalid app planner response")
+                if not calls:
+                    text = step.get("text")
+                    if not isinstance(text, str) or not text.strip():
+                        raise ValueError("Planner returned no result or clarification")
+                    await connection.send_context(text, "speakable", identity)
+                    return
+                history.extend(output)
+                for call in calls:
+                    name, args = validate_app_call(call.get("name"), call.get("arguments"))
+                    call_id = call.get("call_id")
+                    if not isinstance(call_id, str) or call_id in seen_calls or len(seen_calls) >= MAX_CALLS:
+                        raise ValueError("Duplicate or excessive app planner calls")
+                    seen_calls.add(call_id)
+                    result = await self._execute(name, args, connection, epoch)
+                    if name == "stop_music":
+                        epoch = self._work_epoch
+                        if self._current(connection, epoch):
+                            await connection.send_context(json.dumps(result), "speakable", identity)
+                        return
+                    if not self._current(connection, epoch):
+                        return
+                    history.append({"type": "function_call_output", "call_id": call_id, "output": json.dumps(result)})
+                    await connection.send_context(json.dumps({"tool": name, "result": result}), "commentary", identity)
+            raise RuntimeError("App planner reached its bounded round limit")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if self._current(connection, epoch):
+                # Broker/validation errors are safe application messages; other exceptions are class-only.
+                detail = str(exc) if isinstance(exc, (ValueError, RuntimeError)) else type(exc).__name__
+                await connection.send_context(
+                    f"App task failed: {detail}. No automatic retry or API fallback was used.", "speakable", identity
+                )
+
+    def _create_client(self, openai_key: str | None) -> None:
+        if voice_config.VOICE_BACKEND == "subscription":
+            self.client = SubscriptionRealtimeAdapter(
+                model=voice_config.VOICE_MODEL, voice=voice_config.VOICE_NAME, instructions=get_session_instructions()
+            )
+        elif voice_config.VOICE_BACKEND == "api_key":
+            if not openai_key or not openai_key.strip():
+                raise RuntimeError(
+                    "API-key Realtime is selected, but OPENAI_API_KEY is missing; no subscription fallback is used."
+                )
+            if not voice_config.VOICE_MODEL.startswith(("gpt-realtime", "gpt-4o-realtime")):
+                raise RuntimeError(
+                    "API-key Realtime requires an explicit supported Realtime voice.model, such as gpt-realtime."
+                )
+            self.client = AsyncOpenAI(api_key=openai_key.strip())
+        else:
+            raise RuntimeError("Unsupported voice backend; no billing fallback is allowed.")
 
     async def start_up(self) -> None:
+        """Supervise sessions. Subscription reconnect is explicit, never an automatic new billed call."""
         from dj_reachy.config import set_api_keys
-        openai_api_key = config.OPENAI_API_KEY
-        elevenlabs_api_key = config.ELEVENLABS_API_KEY
 
+        openai_key, eleven_key = config.OPENAI_API_KEY, config.ELEVENLABS_API_KEY
         if self.gradio_mode:
             await self.wait_for_args()  # type: ignore[no-untyped-call]
             args = list(self.latest_args)
-            textbox_openai_key = args[3] if len(args) > 3 and isinstance(args[3], str) and args[3].strip() else None
-            textbox_elevenlabs_key = args[4] if len(args) > 4 and isinstance(args[4], str) and args[4].strip() else None
-            if textbox_openai_key:
-                openai_api_key = textbox_openai_key
-            if textbox_elevenlabs_key:
-                elevenlabs_api_key = textbox_elevenlabs_key
-            set_api_keys(openai_api_key, elevenlabs_api_key)
-
-        self.deps.elevenlabs_api_key = elevenlabs_api_key.strip() if elevenlabs_api_key else None
-        if config.VOICE_BACKEND == "subscription":
-            from dj_reachy.subscription_voice import SubscriptionRealtimeAdapter
-            self.client = SubscriptionRealtimeAdapter(
-                model=config.VOICE_MODEL,
-                voice=config.VOICE_NAME,
-                instructions=get_session_instructions(),
-            )
-        elif config.VOICE_BACKEND == "api_key":
-            if not openai_api_key or not openai_api_key.strip():
-                raise RuntimeError("API-key Realtime is selected, but OPENAI_API_KEY is missing. Choose subscription Live or provide a key.")
-            self.client = AsyncOpenAI(api_key=openai_api_key.strip())
-        else:
-            raise RuntimeError(f"Unsupported voice backend {config.VOICE_BACKEND!r}; no billing fallback is allowed.")
-
-        max_attempts = 3
-        for attempt in range(1, max_attempts + 1):
-            try:
-                await self._run_realtime_session()
-                return
-            except (ConnectionClosedError, ConnectionError) as e:
-                logger.warning("Realtime connection closed unexpectedly (attempt %d/%d): %s", attempt, max_attempts, type(e).__name__)
-                if attempt < max_attempts:
-                    await asyncio.sleep(2 ** (attempt - 1) + random.uniform(0, 0.5))
-                    continue
-                raise
-            finally:
-                self.connection = None
-                self._connected_event.clear()
-
-
-    async def _restart_session(self) -> None:
-        """Force-close the current session and start a fresh one in background.
-
-        Does not block the caller while the new session is establishing.
-        """
+            if len(args) > 3 and isinstance(args[3], str) and args[3].strip():
+                openai_key = args[3]
+            if len(args) > 4 and isinstance(args[4], str) and args[4].strip():
+                eleven_key = args[4]
+            set_api_keys(openai_key, eleven_key)
+        self.deps.elevenlabs_api_key = eleven_key.strip() if eleven_key else None
+        self._shutdown_requested = False
+        self._supervisor = asyncio.current_task()
+        attempt = 0
         try:
-            if self.connection is not None:
+            while not self._shutdown_requested:
+                self._restart_requested = False
+                self._create_client(openai_key)
                 try:
-                    await self.connection.close()
-                except Exception:
-                    pass
+                    await self._run_realtime_session()
+                    if not self._restart_requested:
+                        return
+                    attempt = 0
+                except (ConnectionClosedError, ConnectionError) as exc:
+                    attempt += 1
+                    logger.warning(
+                        "Realtime connection closed unexpectedly (attempt %d): %s", attempt, type(exc).__name__
+                    )
+                    if self._shutdown_requested:
+                        return
+                    if voice_config.VOICE_BACKEND == "subscription" or attempt >= 3:
+                        raise
+                    await asyncio.sleep(2 ** (attempt - 1))
                 finally:
+                    await self._end_session_work()
                     self.connection = None
-
-            # Ensure we have a client (start_up must have run once)
-            if getattr(self, "client", None) is None:
-                logger.warning("Cannot restart: OpenAI client not initialized yet.")
-                return
-            if config.VOICE_BACKEND == "subscription":
-                from dj_reachy.subscription_voice import SubscriptionRealtimeAdapter
-                self.client = SubscriptionRealtimeAdapter(
-                    model=config.VOICE_MODEL, voice=config.VOICE_NAME, instructions=get_session_instructions()
-                )
-            elif config.VOICE_BACKEND == "api_key":
-                if not config.OPENAI_API_KEY:
-                    raise RuntimeError("API-key Realtime selected without OPENAI_API_KEY; subscription was not used.")
-                self.client = AsyncOpenAI(api_key=config.OPENAI_API_KEY)
-            else:
-                raise RuntimeError("Unsupported voice backend; no billing fallback is allowed.")
-
-            # Fire-and-forget new session and wait briefly for connection
-            try:
-                self._connected_event.clear()
-            except Exception:
-                pass
-            asyncio.create_task(self._run_realtime_session(), name="openai-realtime-restart")
-            try:
-                await asyncio.wait_for(self._connected_event.wait(), timeout=5.0)
-                logger.info("Realtime session restarted and connected.")
-            except asyncio.TimeoutError:
-                logger.warning("Realtime session restart timed out; continuing in background.")
-        except Exception as e:
-            logger.warning("_restart_session failed: %s", e)
+                    self._connected_event.clear()
+                    if isinstance(self.client, AsyncOpenAI):
+                        await self.client.close()
+        finally:
+            self._supervisor = None
 
     async def _run_realtime_session(self) -> None:
-        """Establish and manage a single realtime session."""
-        model = config.VOICE_MODEL if config.VOICE_BACKEND == "subscription" else config.MODEL_NAME
-        async with self.client.realtime.connect(model=model) as conn:
-            try:
-                session_config: dict[str, Any] = {
+        async with self.client.realtime.connect(model=voice_config.VOICE_MODEL) as conn:
+            self.connection = conn
+            self._seen_calls.clear()
+            self._seen_delegations.clear()
+            self._delegated_turns.clear()
+            self._turn_controls.clear()
+            if voice_config.VOICE_BACKEND == "api_key":
+                session: dict[str, Any] = {
                     "type": "realtime",
                     "instructions": get_session_instructions(),
                     "audio": {
                         "input": {
-                            "format": {"type": "audio/pcm", "rate": self.input_sample_rate},
+                            "format": {"type": "audio/pcm", "rate": 24000},
                             "turn_detection": {"type": "server_vad", "interrupt_response": True},
+                            "transcription": {"model": "gpt-4o-transcribe"},
                         },
-                        "output": {
-                            "format": {"type": "audio/pcm", "rate": self.output_sample_rate},
-                            "voice": get_session_voice(),
-                        },
+                        "output": {"format": {"type": "audio/pcm", "rate": 24000}, "voice": get_session_voice()},
                     },
+                    "tools": get_tool_specs(),
+                    "tool_choice": "auto",
                 }
-                if config.VOICE_BACKEND == "api_key":
-                    session_config["audio"]["input"]["transcription"] = {
-                        "model": "gpt-4o-transcribe",
-                        **({"language": config.CONVERSATION_LANGUAGE} if config.CONVERSATION_LANGUAGE != "auto" else {}),
-                    }
-                    session_config["tools"] = get_tool_specs()
-                    session_config["tool_choice"] = "auto"
-                await conn.session.update(session=session_config)
-                logger.info("Realtime session initialized for backend=%s", config.VOICE_BACKEND)
-            except Exception:
-                logger.exception("Realtime session.update failed; aborting startup")
-                return
-
-            logger.info("Realtime session updated successfully")
-
-            # Manage event received from the openai server
-            self.connection = conn
-            
-            # Trigger automatic startup greeting
-            await self._send_startup_greeting()
+                if voice_config.CONVERSATION_LANGUAGE != "auto":
+                    session["audio"]["input"]["transcription"]["language"] = voice_config.CONVERSATION_LANGUAGE
+                await conn.session.update(session=session)
+            # Subscription configuration was sent with SDP; ordinary session.update is not its dialect.
             self._connected_event.set()
-            async for event in self.connection:
-                logger.debug("Realtime event: %s", event.type)
-                if event.type == "input_transcript.added":
-                    text = str(getattr(event, "text", "") or "")
-                    item = getattr(event, "item", None)
-                    if not text and isinstance(item, dict):
-                        text = str(item.get("text") or "")
-                    if text:
-                        await self.output_queue.put(AdditionalOutputs({"role": "user", "content": text}))
-                if event.type == "output_transcript.added":
-                    text = str(getattr(event, "text", "") or "")
-                    if text:
-                        await self.output_queue.put(AdditionalOutputs({"role": "assistant", "content": text}))
-                if event.type == "turn.done":
-                    turn = getattr(event, "turn", {})
-                    role = turn.get("role") if isinstance(turn, dict) else getattr(turn, "role", None)
-                    transcript = turn.get("transcript") if isinstance(turn, dict) else getattr(turn, "transcript", "")
-                    if role in ("user", "assistant") and transcript:
-                        await self.output_queue.put(AdditionalOutputs({"role": role, "content": transcript}))
-                if event.type == "delegation.created":
-                    self.schedule_subscription_delegation(event)
-                if event.type == "input_audio_buffer.speech_started":
-                    if hasattr(self, "_clear_queue") and callable(self._clear_queue):
-                        self._clear_queue()
-                    if self.deps.head_wobbler is not None:
-                        self.deps.head_wobbler.reset()
-                    self.deps.movement_manager.set_listening(True)
-                    logger.debug("User speech started")
+            async for event in conn:
+                await self._handle_event(event)
 
-                if event.type == "input_audio_buffer.speech_stopped":
-                    self.deps.movement_manager.set_listening(False)
-                    logger.debug("User speech stopped - server will auto-commit with VAD")
-
-                if event.type in (
-                    "response.audio.done",  # GA
-                    "response.output_audio.done",  # GA alias
-                    "response.audio.completed",  # legacy (for safety)
-                    "response.completed",  # text-only completion
-                ):
-                    logger.debug("response completed")
-
-                if event.type == "response.created":
-                    logger.debug("Response created")
-
-                if event.type == "response.done":
-                    # Doesn't mean the audio is done playing
-                    logger.debug("Response done")
-                    # Signal any waiting trigger that the response is complete
-                    if self._waiting_for_response:
-                        self._response_done_event.set()
-                        self._waiting_for_response = False
-
-                # Handle partial transcription (user speaking in real-time)
-                if event.type == "conversation.item.input_audio_transcription.partial":
-                    logger.debug(f"User partial transcript: {event.transcript}")
-
-                    # Increment sequence
-                    self.partial_transcript_sequence += 1
-                    current_sequence = self.partial_transcript_sequence
-
-                    # Cancel previous debounce task if it exists
-                    if self.partial_transcript_task and not self.partial_transcript_task.done():
-                        self.partial_transcript_task.cancel()
-                        try:
-                            await self.partial_transcript_task
-                        except asyncio.CancelledError:
-                            pass
-
-                    # Start new debounce timer with sequence number
-                    self.partial_transcript_task = asyncio.create_task(
-                        self._emit_debounced_partial(event.transcript, current_sequence)
+    async def _handle_event(self, event: Any) -> None:
+        kind = event.type
+        if kind in ("input_transcript.added", "output_transcript.added"):
+            item = getattr(event, "item", {})
+            text = item.get("text", "") if isinstance(item, dict) else ""
+            if text:
+                self.last_activity_time = monotonic()
+                await self.output_queue.put(
+                    AdditionalOutputs(
+                        {"role": "user_partial" if kind.startswith("input") else "assistant_partial", "content": text}
                     )
+                )
+        elif kind == "turn.done":
+            turn = getattr(event, "turn", {})
+            if isinstance(turn, dict) and turn.get("role") in ("user", "assistant") and turn.get("transcript"):
+                text = turn["transcript"]
+                if turn["role"] == "user":
+                    control = fast_control(text)
+                    if control is not None:
+                        self._control_for_turn(getattr(event, "turn_id", -1), control)
+                await self.output_queue.put(AdditionalOutputs({"role": turn["role"], "content": text}))
+        elif kind == "delegation.created":
+            self.schedule_subscription_delegation(event)
+        elif kind == "response.function_call_arguments.done":
+            name, arguments, identity = (getattr(event, field, None) for field in ("name", "arguments", "call_id"))
+            if isinstance(name, str) and isinstance(arguments, str) and isinstance(identity, str):
+                self.schedule_tool_call(name, arguments, identity)
+        elif kind == "input_audio_buffer.speech_started":
+            clear = getattr(self, "_clear_queue", None)
+            if callable(clear):
+                clear()
+            if self.deps.head_wobbler is not None:
+                self.deps.head_wobbler.reset()
+            self.deps.movement_manager.set_listening(True)
+        elif kind == "input_audio_buffer.speech_stopped":
+            self.deps.movement_manager.set_listening(False)
+        elif kind in (
+            "conversation.item.input_audio_transcription.completed",
+            "response.audio_transcript.done",
+            "response.output_audio_transcript.done",
+        ):
+            role = "user" if kind.startswith("conversation") else "assistant"
+            await self.output_queue.put(AdditionalOutputs({"role": role, "content": event.transcript}))
+        elif kind in ("response.audio.delta", "response.output_audio.delta"):
+            if not self._mute_output_audio:
+                if self.deps.head_wobbler is not None:
+                    self.deps.head_wobbler.feed(event.delta)
+                self.last_activity_time = monotonic()
+                await self.output_queue.put(
+                    (24000, np.frombuffer(base64.b64decode(event.delta), dtype=np.int16).reshape(1, -1))
+                )
+        elif kind == "response.done":
+            if self._waiting_for_response:
+                self._response_done_event.set()
+                self._waiting_for_response = False
+        elif kind == "error":
+            error = getattr(event, "error", {})
+            message = (
+                error.get("message", "Voice provider error")
+                if isinstance(error, dict)
+                else getattr(error, "message", "Voice provider error")
+            )
+            await self.output_queue.put(AdditionalOutputs({"role": "assistant", "content": f"[error] {message}"}))
 
-                # Handle completed transcription (user finished speaking)
-                if event.type == "conversation.item.input_audio_transcription.completed":
-                    logger.debug(f"User transcript: {event.transcript}")
+    async def _end_session_work(self) -> None:
+        active = bool(self._work_tasks or self._song_task)
+        self._work_epoch += 1
+        tasks = [*self._tool_tasks.values(), *self._subscription_tasks.values()]
+        for task in tasks:
+            task.cancel()
+        if active:
+            await self._dispatch("stop_music", {})
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.gather(*list(self._control_tasks), return_exceptions=True)
+        self._tool_tasks.clear()
+        self._subscription_tasks.clear()
+        self._work_tasks.clear()
+        self._control_tasks.clear()
+        self._turn_controls.clear()
+        self._song_task = None
+        self._music_call_active = False
 
-                    # Cancel any pending partial emission
-                    if self.partial_transcript_task and not self.partial_transcript_task.done():
-                        self.partial_transcript_task.cancel()
-                        try:
-                            await self.partial_transcript_task
-                        except asyncio.CancelledError:
-                            pass
-
-                    await self.output_queue.put(AdditionalOutputs({"role": "user", "content": event.transcript}))
-
-                # Handle assistant transcription
-                if event.type in ("response.audio_transcript.done", "response.output_audio_transcript.done"):
-                    logger.debug(f"Assistant transcript: {event.transcript}")
-                    await self.output_queue.put(AdditionalOutputs({"role": "assistant", "content": event.transcript}))
-
-                # Handle audio delta
-                if event.type in ("response.audio.delta", "response.output_audio.delta"):
-                    if self._mute_output_audio:
-                        # Drop assistant audio while an external track is playing
-                        continue
-                    if self.deps.head_wobbler is not None:
-                        self.deps.head_wobbler.feed(event.delta)
-                    self.last_activity_time = asyncio.get_event_loop().time()
-                    await self.output_queue.put(
-                        (
-                            self.output_sample_rate,
-                            np.frombuffer(base64.b64decode(event.delta), dtype=np.int16).reshape(1, -1),
-                        ),
-                    )
-
-                # ---- tool-calling plumbing ----
-                if event.type == "response.function_call_arguments.done":
-                    tool_name = getattr(event, "name", None)
-                    args_json_str = getattr(event, "arguments", None)
-                    call_id = getattr(event, "call_id", None)
-                    if not all(isinstance(value, str) for value in (tool_name, args_json_str, call_id)):
-                        logger.error("Ignoring uncorrelated or malformed tool call event")
-                        continue
-                    self.schedule_tool_call(tool_name, args_json_str, call_id)
-
-                # server error
-                if event.type == "error":
-                    err = getattr(event, "error", None)
-                    msg = getattr(err, "message", str(err) if err else "unknown error")
-                    code = getattr(err, "code", "")
-
-                    logger.error("Realtime error [%s]: %s (raw=%s)", code, msg, err)
-
-                    # Only show user-facing errors, not internal state errors
-                    if code not in ("input_audio_buffer_commit_empty", "conversation_already_has_active_response"):
-                        await self.output_queue.put(
-                            AdditionalOutputs({"role": "assistant", "content": f"[error] {msg}"})
-                        )
-
-    # Microphone receive
-    async def receive(self, frame: Tuple[int, NDArray[np.int16]]) -> None:
-        """Receive audio frame from the microphone and send it to the OpenAI server.
-
-        Handles both mono and stereo audio formats, converting to the expected
-        mono format for OpenAI's API. Resamples if the input sample rate differs
-        from the expected rate.
-
-        Args:
-            frame: A tuple containing (sample_rate, audio_data).
-
-        """
-        if not self.connection:
+    async def _restart_session(self) -> None:
+        """Request one supervised reconnect without launching a second receiver."""
+        if self._supervisor is None or self._supervisor.done():
+            raise RuntimeError("Voice supervisor is not running; start the handler before reconnecting")
+        owner_loop = self._supervisor.get_loop()
+        if owner_loop is not asyncio.get_running_loop():
+            await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(self._restart_session(), owner_loop))
             return
+        self._restart_requested = True
+        self._connected_event.clear()
+        if self.connection is not None:
+            await self.connection.close()
+        await asyncio.wait_for(self._connected_event.wait(), timeout=45)
 
-        input_sample_rate, audio_frame = frame
+    async def reload_instructions(self) -> str:
+        """Reload user-owned instructions with one explicit reconnect for either backend."""
+        await self._restart_session()
+        return "Instructions reloaded and voice reconnected."
 
-        # Reshape if needed
-        if audio_frame.ndim == 2:
-            # Scipy channels last convention
-            if audio_frame.shape[1] > audio_frame.shape[0]:
-                audio_frame = audio_frame.T
-            # Multiple channels -> Mono channel
-            if audio_frame.shape[1] > 1:
-                audio_frame = audio_frame[:, 0]
+    async def apply_personality(self, profile: str | None) -> str:
+        """Retain the UI contract; the selected app profile remains config-owned."""
+        from dj_reachy.config import set_custom_profile
 
-        # Resample if needed
-        if self.input_sample_rate != input_sample_rate:
-            audio_frame = resample(audio_frame, int(len(audio_frame) * self.input_sample_rate / input_sample_rate))
+        set_custom_profile(profile)
+        if self.connection is None:
+            return "Instructions will load on the next voice connection."
+        return await self.reload_instructions()
 
-        # Cast if needed
-        audio_frame = audio_to_int16(audio_frame)
-
-        # Send to OpenAI (guard against races during reconnect)
+    async def receive(self, frame: tuple[int, NDArray[np.int16]]) -> None:
+        """Send supplied PCM to the selected adapter, never open a microphone device."""
+        connection = self.connection
+        if connection is None:
+            return
+        rate, audio = frame
+        if audio.ndim == 2:
+            if audio.shape[1] > audio.shape[0]:
+                audio = audio.T
+            if audio.shape[1] > 1:
+                audio = audio[:, 0]
+        if rate != 24000:
+            audio = resample(audio, int(len(audio) * 24000 / rate))
+        pcm = audio_to_int16(audio)
         try:
-            audio_message = base64.b64encode(audio_frame.tobytes()).decode("utf-8")
-            await self.connection.input_audio_buffer.append(audio=audio_message)
-        except Exception as e:
-            logger.debug("Dropping audio frame: connection not ready (%s)", e)
-            return
+            await connection.input_audio_buffer.append(audio=base64.b64encode(pcm.tobytes()).decode("ascii"))
+        except (ConnectionError, RuntimeError):
+            logger.debug("Audio input discarded during reconnect")
 
-    async def emit(self) -> Tuple[int, NDArray[np.int16]] | AdditionalOutputs | None:
-        """Emit audio frame to be played by the speaker."""
-        # sends to the stream the stuff put in the output queue by the openai event handler
-        # This is called periodically by the fastrtc Stream
-
-        # Handle idle
-        idle_duration = asyncio.get_event_loop().time() - self.last_activity_time
-        if idle_duration > 15.0 and self.deps.movement_manager.is_idle():
-            try:
-                await self.send_idle_signal(idle_duration)
-            except Exception as e:
-                logger.warning("Idle signal skipped (connection closed?): %s", e)
-                return None
-
-            self.last_activity_time = asyncio.get_event_loop().time()  # avoid repeated resets
-
+    async def emit(self) -> tuple[int, NDArray[np.int16]] | AdditionalOutputs | None:
+        """Emit already received media; never infer consumer response completion from PCM."""
         return await wait_for_item(self.output_queue)  # type: ignore[no-any-return]
 
     async def shutdown(self) -> None:
-        """Shutdown the handler."""
+        """Cancel all owned tasks, stop local song work, and close transport."""
         self._shutdown_requested = True
-        # Cancel any pending debounce task
-        if self.partial_transcript_task and not self.partial_transcript_task.done():
-            self.partial_transcript_task.cancel()
-            try:
-                await self.partial_transcript_task
-            except asyncio.CancelledError:
-                pass
-        owned_tasks = [*self._tool_tasks.values(), *self._subscription_tasks.values()]
-        for task in owned_tasks:
-            task.cancel()
-        if owned_tasks:
-            await asyncio.gather(*owned_tasks, return_exceptions=True)
-        self._tool_tasks.clear()
-        self._subscription_tasks.clear()
-
-        if self.connection:
-            try:
-                await self.connection.close()
-            except ConnectionClosedError as e:
-                logger.debug(f"Connection already closed during shutdown: {e}")
-            except Exception as e:
-                logger.debug(f"connection.close() ignored: {e}")
-            finally:
-                self.connection = None
-
-        # Clear any remaining items in the output queue
+        supervisor = self._supervisor
+        if supervisor is not None and supervisor is not asyncio.current_task() and not supervisor.done():
+            supervisor.cancel()
+            await asyncio.gather(supervisor, return_exceptions=True)
+        await self._end_session_work()
+        if self.connection is not None:
+            await self.connection.close()
+            self.connection = None
+        self._connected_event.clear()
         while not self.output_queue.empty():
-            try:
-                self.output_queue.get_nowait()
-            except asyncio.QueueEmpty:
-                break
+            self.output_queue.get_nowait()
 
     def format_timestamp(self) -> str:
-        """Format current timestamp with date, time, and elapsed seconds."""
-        loop_time = asyncio.get_event_loop().time()  # monotonic
-        elapsed_seconds = loop_time - self.start_time
-        dt = datetime.now()  # wall-clock
-        return f"[{dt.strftime('%Y-%m-%d %H:%M:%S')} | +{elapsed_seconds:.1f}s]"
+        """Format wall-clock time and monotonic elapsed time."""
+        elapsed = monotonic() - self.start_time
+        return f"[{datetime.now():%Y-%m-%d %H:%M:%S} | +{elapsed:.1f}s]"
 
     async def get_available_voices(self) -> list[str]:
-        """Try to discover available voices for the configured realtime model.
-
-        Attempts to retrieve model metadata from the OpenAI Models API and look
-        for any keys that might contain voice names. Falls back to a curated
-        list known to work with realtime if discovery fails.
-        """
-        # Conservative fallback list with default first
-        fallback = [
-            "cedar",
-            "alloy",
-            "aria",
-            "ballad",
-            "verse",
-            "sage",
-            "coral",
-        ]
-        try:
-            # Best effort discovery; safe-guarded for unexpected shapes
-            model = await self.client.models.retrieve(config.MODEL_NAME)
-            # Try common serialization paths
-            raw = None
-            for attr in ("model_dump", "to_dict"):
-                fn = getattr(model, attr, None)
-                if callable(fn):
-                    try:
-                        raw = fn()
-                        break
-                    except Exception:
-                        pass
-            if raw is None:
-                try:
-                    raw = dict(model)
-                except Exception:
-                    raw = None
-            # Scan for voice candidates
-            candidates: set[str] = set()
-
-            def _collect(obj: object) -> None:
-                try:
-                    if isinstance(obj, dict):
-                        for k, v in obj.items():
-                            kl = str(k).lower()
-                            if "voice" in kl and isinstance(v, (list, tuple)):
-                                for item in v:
-                                    if isinstance(item, str):
-                                        candidates.add(item)
-                                    elif isinstance(item, dict) and "name" in item and isinstance(item["name"], str):
-                                        candidates.add(item["name"])
-                            else:
-                                _collect(v)
-                    elif isinstance(obj, (list, tuple)):
-                        for it in obj:
-                            _collect(it)
-                except Exception:
-                    pass
-
-            if isinstance(raw, dict):
-                _collect(raw)
-            # Ensure default present and stable order
-            voices = sorted(candidates) if candidates else fallback
-            if "cedar" not in voices:
-                voices = ["cedar", *[v for v in voices if v != "cedar"]]
-            return voices
-        except Exception:
-            return fallback
+        """Return documented backend choices without a separate authenticated discovery call."""
+        if voice_config.VOICE_BACKEND == "subscription":
+            return ["cove"]
+        return ["alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse", "marin", "cedar"]
 
     async def trigger_response_and_wait(
-        self,
-        system_message: str,
-        response_instructions: str,
-        timeout: float = 15.0,
+        self, system_message: str, response_instructions: str, timeout: float = 15.0
     ) -> bool:
-        """Trigger a response and wait for it to complete speaking.
-        
-        Args:
-            system_message: The [SYSTEM: ...] message to inject
-            response_instructions: Instructions for this specific response
-            timeout: Maximum time to wait for response completion
-            
-        Returns:
-            True if response completed, False if timed out or failed
-        """
-        if not self.connection:
-            logger.debug("No connection, cannot trigger response")
+        """Return false for consumer context delivery: its protocol has no response.done guarantee."""
+        if self.connection is None:
             return False
-        
+        if hasattr(self.connection, "send_context"):
+            await self.connection.send_context(system_message, "commentary")
+            await self.connection.send_context(response_instructions, "speakable")
+            return False
+        self._response_done_event.clear()
+        self._waiting_for_response = True
         try:
-            # Reset the event and set waiting flag
-            self._response_done_event.clear()
-            self._waiting_for_response = True
-            
-            # Create the system message
             await self.connection.conversation.item.create(
-                item={
-                    "type": "message",
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": system_message}],
-                },
+                item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": system_message}]}
             )
-            
-            # Trigger the response with specific instructions
-            await self.connection.response.create(
-                response={
-                    "instructions": response_instructions + " Always respond in ENGLISH.",
-                },
-            )
-            
-            # Wait for the response to complete (response.done event)
-            try:
-                await asyncio.wait_for(self._response_done_event.wait(), timeout=timeout)
-                logger.info("Triggered response completed")
-                # Give a small buffer for audio to finish playing
-                await asyncio.sleep(0.5)
-                return True
-            except asyncio.TimeoutError:
-                logger.warning("Triggered response timed out after %.1fs", timeout)
-                self._waiting_for_response = False
-                return False
-                
-        except Exception as e:
-            logger.warning("Failed to trigger response: %s", e)
+            await self.connection.response.create(response={"instructions": response_instructions})
+            await asyncio.wait_for(self._response_done_event.wait(), timeout)
+            return True
+        except (ConnectionError, asyncio.TimeoutError):
+            return False
+        finally:
             self._waiting_for_response = False
-            return False
-
-    async def _send_startup_greeting(self) -> None:
-        """Send a startup signal to trigger the automatic greeting."""
-        if not self.connection:
-            logger.debug("No connection, cannot send startup greeting")
-            return
-        
-        logger.info("Triggering startup greeting...")
-        try:
-            await self.connection.conversation.item.create(
-                item={
-                    "type": "message",
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": "[SYSTEM: Application just started. Greet the user warmly in ENGLISH and ask what kind of song they'd like!]"}],
-                },
-            )
-            await self.connection.response.create(
-                response={
-                    "instructions": "Give a warm, enthusiastic greeting IN ENGLISH and ask the user what kind of song they'd like. Do NOT generate any songs - just greet and ask. SPEAK ENGLISH ONLY.",
-                },
-            )
-            logger.info("Startup greeting triggered")
-        except Exception as e:
-            logger.warning("Failed to send startup greeting: %s", e)
 
     async def send_idle_signal(self, idle_duration: float) -> None:
-        """Send an idle signal to the openai server."""
-        logger.debug("Sending idle signal")
-        self.is_idle_tool_call = True
-        timestamp_msg = f"[Idle time update: {self.format_timestamp()} - No activity for {idle_duration:.1f}s] You've been idle for a while. Feel free to get creative - dance, show an emotion, look around, do nothing, or just be yourself!"
-        if not self.connection:
-            logger.debug("No connection, cannot send idle signal")
-            return
-        await self.connection.conversation.item.create(
-            item={
-                "type": "message",
-                "role": "user",
-                "content": [{"type": "input_text", "text": timestamp_msg}],
-            },
-        )
-        await self.connection.response.create(
-            response={
-                "instructions": "You MUST respond with function calls only - no speech or text. Choose appropriate actions for idle behavior.",
-                "tool_choice": "required",
-            },
-        )
+        """Keep compatibility without authorizing unsolicited music generation or motion."""
+        if self.connection is not None and hasattr(self.connection, "send_context"):
+            await self.connection.send_context(
+                f"App idle for {idle_duration:.1f} seconds. No new user command.", "commentary"
+            )

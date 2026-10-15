@@ -3,32 +3,49 @@
 from __future__ import annotations
 import json
 import asyncio
-from types import SimpleNamespace
 from pathlib import Path
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from unittest.mock import MagicMock
+from collections.abc import AsyncIterator
 
 import pytest
 import test_music_lifecycle as lifecycle
 
 import dj_reachy.profiles.dj_reachy.make_song_and_dance as music
 from dj_reachy.config import config
+from dj_reachy.tools.core_tools import ToolDependencies
 
 
 actor = lifecycle.actor
 real_mp3 = lifecycle.real_mp3
 
+@dataclass
+class ComposeServer:
+    """Observe real loopback requests and socket ownership."""
+
+    received: asyncio.Event
+    release: asyncio.Event
+    closed: asyncio.Event
+    requests: list[tuple[str, dict[str, str], dict[str, object]]]
+
+
 
 @asynccontextmanager
-async def compose_server(monkeypatch, *, body=b"x" * 2048, stall=False, partial=False, status=200, mime="audio/mpeg"):
+async def compose_server(
+    monkeypatch: pytest.MonkeyPatch, *, body: bytes = b"x" * 2048, stall: bool = False,
+    partial: bool = False, status: int = 200, mime: str = "audio/mpeg"
+) -> AsyncIterator[ComposeServer]:
     """Serve bounded real HTTP fixtures and observe client disconnection."""
     received = asyncio.Event()
     release = asyncio.Event()
     closed = asyncio.Event()
-    requests = []
-    connections = set()
+    requests: list[tuple[str, dict[str, str], dict[str, object]]] = []
+    connections: set[asyncio.Task[None]] = set()
 
-    async def serve(reader, writer):
+    async def serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         current = asyncio.current_task()
+        assert current is not None
         connections.add(current)
         try:
             head = await reader.readuntil(b"\r\n\r\n")
@@ -66,7 +83,7 @@ async def compose_server(monkeypatch, *, body=b"x" * 2048, stall=False, partial=
     port = server.sockets[0].getsockname()[1]
     monkeypatch.setattr(music, "ELEVEN_MUSIC_URL", f"http://127.0.0.1:{port}/v1/music")
     try:
-        yield SimpleNamespace(received=received, release=release, closed=closed, requests=requests)
+        yield ComposeServer(received, release, closed, requests)
     finally:
         release.set()
         server.close()
@@ -76,10 +93,12 @@ async def compose_server(monkeypatch, *, body=b"x" * 2048, stall=False, partial=
 
 
 @pytest.mark.asyncio
-async def test_stop_cancels_stalled_http_and_discards_track(monkeypatch, tmp_path):
+async def test_stop_cancels_stalled_http_and_discards_track(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """Close a stalled local request without waiting for the provider timeout."""
     monkeypatch.setattr(config, "SONGS_DIR", tmp_path)
-    deps = SimpleNamespace(elevenlabs_api_key="fixture-only", openai_realtime_handler=None)
+    deps = ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock(), elevenlabs_api_key="fixture-only")
     async with compose_server(monkeypatch, stall=True) as server:
         task = asyncio.create_task(music.MakeSongAndDance()(deps, prompt="fixture", music_length_ms=10000))
         try:
@@ -96,7 +115,9 @@ async def test_stop_cancels_stalled_http_and_discards_track(monkeypatch, tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_tool_generates_decodes_and_saves_normalized_metadata(monkeypatch, tmp_path, actor, real_mp3):
+async def test_tool_generates_decodes_and_saves_normalized_metadata(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, actor: lifecycle.PlaybackActor, real_mp3: Path
+) -> None:
     """Exercise tool defaults and overrides through HTTP, disk and real decoding."""
     monkeypatch.setattr(config, "SONGS_DIR", tmp_path)
     monkeypatch.setattr(config, "MUSIC_MODEL_ID", "music_v1")
@@ -125,6 +146,7 @@ async def test_tool_generates_decodes_and_saves_normalized_metadata(monkeypatch,
         assert path.read_bytes() == real_mp3.read_bytes()
         metadata = json.loads(path.with_suffix(".json").read_text())
         request_line, headers, payload = server.requests[0]
+        assert isinstance(payload["prompt"], str)
         assert request_line == "POST /v1/music?output_format=mp3_48000_192 HTTP/1.1"
         assert payload["model_id"] == "music_v2_5"
         assert payload["music_length_ms"] == 47000

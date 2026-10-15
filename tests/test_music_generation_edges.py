@@ -1,11 +1,13 @@
 """Cancellation, admission, HTTP errors and atomic library commit boundaries."""
 
 from __future__ import annotations
+import os
 import json
+import time
 import asyncio
 import threading
-from types import SimpleNamespace
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 import test_music_lifecycle as lifecycle
@@ -13,6 +15,7 @@ from test_music_generation import compose_server
 
 import dj_reachy.profiles.dj_reachy.make_song_and_dance as music
 from dj_reachy.config import config
+from dj_reachy.tools.core_tools import ToolDependencies
 
 
 actor = lifecycle.actor
@@ -20,10 +23,10 @@ real_mp3 = lifecycle.real_mp3
 
 
 @pytest.mark.asyncio
-async def test_task_shutdown_closes_partial_http_body(monkeypatch, tmp_path):
+async def test_task_shutdown_closes_partial_http_body(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Close sockets and discard partial audio during app task shutdown."""
     monkeypatch.setattr(config, "SONGS_DIR", tmp_path)
-    deps = SimpleNamespace(elevenlabs_api_key="fixture-only")
+    deps = ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock(), elevenlabs_api_key="fixture-only")
     async with compose_server(monkeypatch, stall=True, partial=True) as server:
         task = asyncio.create_task(music.MakeSongAndDance()(deps, prompt="fixture", music_length_ms=10000))
         await asyncio.wait_for(server.received.wait(), 2)
@@ -36,7 +39,9 @@ async def test_task_shutdown_closes_partial_http_body(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_generation_admission_rejects_second_generation_and_replay(monkeypatch, tmp_path, actor):
+async def test_generation_admission_rejects_second_generation_and_replay(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, actor: lifecycle.PlaybackActor
+) -> None:
     """Reserve one music job across generation and replay admission."""
     monkeypatch.setattr(config, "SONGS_DIR", tmp_path)
     actor.deps.elevenlabs_api_key = "fixture-only"
@@ -64,10 +69,12 @@ async def test_generation_admission_rejects_second_generation_and_replay(monkeyp
         (200, "audio/mpeg", b"x"),
     ],
 )
-async def test_provider_errors_do_not_commit_or_echo_body(monkeypatch, tmp_path, status, mime, body):
+async def test_provider_errors_do_not_commit_or_echo_body(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, status: int, mime: str, body: bytes
+) -> None:
     """Reject HTTP/content failures without saving files or echoing error bodies."""
     monkeypatch.setattr(config, "SONGS_DIR", tmp_path)
-    deps = SimpleNamespace(elevenlabs_api_key="fixture-only")
+    deps = ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock(), elevenlabs_api_key="fixture-only")
     async with compose_server(monkeypatch, status=status, mime=mime, body=body):
         with pytest.raises(RuntimeError) as error:
             await music._compose_music("fixture", deps=deps, music_length_ms=10000)
@@ -76,36 +83,44 @@ async def test_provider_errors_do_not_commit_or_echo_body(monkeypatch, tmp_path,
 
 
 @pytest.mark.asyncio
-async def test_atomic_commit_rolls_back_when_audio_publish_fails(monkeypatch, tmp_path, real_mp3):
+async def test_atomic_commit_rolls_back_when_audio_publish_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, real_mp3: Path
+) -> None:
     """Remove staged metadata when the audio visibility marker cannot publish."""
     monkeypatch.setattr(config, "SONGS_DIR", tmp_path)
-    replace = music.os.replace
+    replace = os.replace
 
-    def fail_audio(source, target):
+    def fail_audio(source: str | Path, target: str | Path) -> None:
         if str(target).endswith(".mp3"):
             raise OSError("fixture-atomic-publish-error")
-        return replace(source, target)
+        replace(source, target)
 
-    monkeypatch.setattr(music.os, "replace", fail_audio)
+    monkeypatch.setattr(os, "replace", fail_audio)
     async with compose_server(monkeypatch, body=real_mp3.read_bytes()):
         with pytest.raises(OSError, match="fixture-atomic-publish-error"):
             await music._compose_music(
-                "fixture", deps=SimpleNamespace(elevenlabs_api_key="fixture-only"), music_length_ms=10000
+                "fixture", deps=ToolDependencies(
+                    reachy_mini=MagicMock(), movement_manager=MagicMock(), elevenlabs_api_key="fixture-only"
+                ), music_length_ms=10000
             )
     assert list(tmp_path.iterdir()) == []
 
 
 @pytest.mark.asyncio
-async def test_same_timestamp_generations_get_distinct_complete_pairs(monkeypatch, tmp_path, real_mp3):
+async def test_same_timestamp_generations_get_distinct_complete_pairs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, real_mp3: Path
+) -> None:
     """Keep simultaneous same-title outputs distinct and record auto's codec."""
     monkeypatch.setattr(config, "SONGS_DIR", tmp_path)
-    monkeypatch.setattr(music.time, "time", lambda: 1234.0)
+    monkeypatch.setattr(time, "time", lambda: 1234.0)
     async with compose_server(monkeypatch, body=real_mp3.read_bytes()):
         paths = await asyncio.gather(
             *(
                 music._compose_music(
                     "same",
-                    deps=SimpleNamespace(elevenlabs_api_key="fixture-only"),
+                    deps=ToolDependencies(
+                        reachy_mini=MagicMock(), movement_manager=MagicMock(), elevenlabs_api_key="fixture-only"
+                    ),
                     music_length_ms=10000,
                     output_format="auto",
                 )
@@ -121,12 +136,12 @@ async def test_same_timestamp_generations_get_distinct_complete_pairs(monkeypatc
     assert len(list(tmp_path.iterdir())) == 4
 
 
-def test_already_cancelled_queued_generation_does_not_load_credentials(monkeypatch):
+def test_already_cancelled_queued_generation_does_not_load_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     """Reject already-cancelled queued work before any key lookup."""
     event = threading.Event()
     event.set()
 
-    def no_key(*_args):
+    def no_key(*_args: object) -> str:
         raise AssertionError("Cancelled queued generation reached the credential/provider boundary")
 
     monkeypatch.setattr(music, "_get_elevenlabs_key", no_key)

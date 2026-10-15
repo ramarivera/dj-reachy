@@ -1,83 +1,82 @@
+"""Nonsecret runtime settings and process-local provider credentials."""
+
 import os
-import logging
+import sys
+from typing import Any
 from pathlib import Path
 
-
 from dj_reachy.runtime_settings import RuntimeSettingsStore
-logger = logging.getLogger(__name__)
 
 
 class Config:
-    """Configuration class for the conversation app.
-    
-    API keys (OPENAI_API_KEY, ELEVENLABS_API_KEY) are provided via the web UI.
-    Other settings are hardcoded with sensible defaults.
-    """
+    """Keep user state outside the installed package and secrets outside JSON."""
 
-    # API Keys - provided via web UI, fall back to env vars if set
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
     ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
-
-    # Model settings (hardcoded)
-    MODEL_NAME = "gpt-4o-realtime-preview"
-
-    # ElevenLabs music settings (hardcoded)
-    ELEVEN_MUSIC_LENGTH_MS = 30000
-    ELEVEN_MUSIC_TIMEOUT_S = 180
-
-    # Vision model settings (hardcoded)
-    HF_HOME = "./cache"
-    LOCAL_VISION_MODEL = "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
-    HF_TOKEN = os.getenv("HF_TOKEN")  # Optional, falls back to hf auth login if not set
-
-    # Profile settings - always use dj_reachy profile
-    # This is the default DJ profile and cannot be changed via environment
+    HF_TOKEN = os.getenv("HF_TOKEN")
     DEFAULT_PROFILE = "dj_reachy"
     REACHY_MINI_CUSTOM_PROFILE = DEFAULT_PROFILE
-
-    # User-owned data, never source-package files.
-    APP_HOME = Path(
-        os.environ.get("DJ_REACHY_HOME")
-        or Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "dj-reachy"
-    )
+    APP_HOME = Path(os.getenv("DJ_REACHY_HOME") or
+                    Path(os.getenv("XDG_DATA_HOME", str(Path.home() / ".local/share"))) / "dj-reachy").expanduser()
     SONGS_DIR = APP_HOME / "songs"
     RUNTIME_SETTINGS_PATH = APP_HOME / "settings.json"
-
-    logger.debug(f"Model: {MODEL_NAME}, HF_HOME: {HF_HOME}, Vision Model: {LOCAL_VISION_MODEL}")
-    logger.debug(f"Custom Profile: {REACHY_MINI_CUSTOM_PROFILE}")
+    HF_HOME = os.getenv("HF_HOME") or str(Path(os.getenv("XDG_CACHE_HOME", str(Path.home() / ".cache"))) / "dj-reachy/hf")
+    LOCAL_VISION_MODEL = "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
+    ELEVEN_MUSIC_TIMEOUT_S = 180
+    RUNTIME_SETTINGS: dict[str, dict[str, Any]] = {}
+    MODEL_NAME = "gpt-live-1-codex"
+    VOICE_BACKEND = "subscription"
+    VOICE_MODEL = "gpt-live-1-codex"
+    VOICE_NAME = "cove"
+    CONVERSATION_LANGUAGE = "auto"
+    MUSIC_MODEL_ID = "music_v2_5"
+    ELEVEN_MUSIC_LENGTH_MS = 30000
+    MUSIC_OUTPUT_FORMAT = "mp3_48000_192"
+    MUSIC_POSITIVE_STYLES: list[str] = []
+    MUSIC_NEGATIVE_STYLES: list[str] = []
+    MUSIC_LYRICS = ""
+    MUSIC_LANGUAGE = "auto"
+    MUSIC_FORCE_INSTRUMENTAL = False
+    MUSIC_FINETUNE_ID: str | None = None
+    MOTION_STYLE = "groove"
+    MOTION_INTENSITY = 0.2
 
 
 config = Config()
-
-
 runtime_settings_store = RuntimeSettingsStore(config.RUNTIME_SETTINGS_PATH)
 
 
-def apply_runtime_settings(settings: dict) -> None:
-    """Apply nonsecret settings to the existing provider and dance config."""
-    voice = settings["voice"]
-    music = settings["music"]
-    motion = settings["motion"]
+def apply_runtime_settings(settings: dict[str, dict[str, Any]]) -> None:
+    """Update the provider configuration and any already-created local dancer."""
+    voice, music, motion = settings["voice"], settings["music"], settings["motion"]
     config.RUNTIME_SETTINGS = settings
     config.VOICE_BACKEND = voice["backend"]
     config.VOICE_MODEL = voice["model"]
+    config.MODEL_NAME = voice["model"]
     config.VOICE_NAME = voice["voice"]
     config.CONVERSATION_LANGUAGE = voice["language"]
     config.MUSIC_MODEL_ID = music["model_id"]
     config.ELEVEN_MUSIC_LENGTH_MS = music["duration_ms"]
     config.MUSIC_OUTPUT_FORMAT = music["output_format"]
-    config.MUSIC_POSITIVE_STYLES = music["positive_styles"]
-    config.MUSIC_NEGATIVE_STYLES = music["negative_styles"]
+    config.MUSIC_POSITIVE_STYLES = list(music["positive_styles"])
+    config.MUSIC_NEGATIVE_STYLES = list(music["negative_styles"])
     config.MUSIC_LYRICS = music["lyrics"]
     config.MUSIC_LANGUAGE = music["language"]
     config.MUSIC_FORCE_INSTRUMENTAL = music["force_instrumental"]
     config.MUSIC_FINETUNE_ID = music["finetune_id"]
     config.MOTION_STYLE = motion["style"]
     config.MOTION_INTENSITY = motion["intensity"]
+    # Don't import tools while config itself is initializing. Existing dancers update now;
+    # dancers created later consume the same bounded config values.
+    music_module = sys.modules.get("dj_reachy.profiles.dj_reachy.make_song_and_dance")
+    if music_module is not None and hasattr(music_module, "set_dance_intensity"):
+        music_module.set_dance_intensity(config.MOTION_INTENSITY)
+        music_module.set_dance_style(config.MOTION_STYLE)
 
 
-def update_runtime_settings(updates: dict) -> dict:
-    settings = runtime_settings_store.update(updates)
+def update_runtime_settings(updates: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Validate and persist before mutating live provider or motion configuration."""
+    settings = RuntimeSettingsStore(config.RUNTIME_SETTINGS_PATH).update(updates)
     apply_runtime_settings(settings)
     return settings
 
@@ -86,20 +85,14 @@ apply_runtime_settings(runtime_settings_store.read())
 
 
 def set_custom_profile(profile: str | None) -> None:
-    """Update the selected custom profile at runtime.
-
-    Note: This function is a no-op - the profile is always fixed to dj_reachy.
-    This ensures the DJ Reachy experience is consistent for all users.
-    """
-    # Profile is locked to dj_reachy - ignore any attempts to change it
-    pass
+    """Preserve the fixed DJ tool registry; persona lives in instructions.md."""
+    if profile not in (None, "", Config.DEFAULT_PROFILE):
+        raise ValueError("DJ Reachy uses a fixed tool profile; edit user instructions instead.")
 
 
 def set_api_keys(openai_key: str | None = None, elevenlabs_key: str | None = None) -> None:
-    """Update API keys at runtime (from web UI)."""
-    if openai_key:
-        config.OPENAI_API_KEY = openai_key
-        os.environ["OPENAI_API_KEY"] = openai_key
-    if elevenlabs_key:
-        config.ELEVENLABS_API_KEY = elevenlabs_key
-        os.environ["ELEVENLABS_API_KEY"] = elevenlabs_key
+    """Accept explicitly supplied keys without selecting a billing backend."""
+    for name, value in (("OPENAI_API_KEY", openai_key), ("ELEVENLABS_API_KEY", elevenlabs_key)):
+        if value and value.strip():
+            setattr(config, name, value.strip())
+            os.environ[name] = value.strip()

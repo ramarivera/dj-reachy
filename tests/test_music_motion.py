@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 import dj_reachy.profiles.dj_reachy.make_song_and_dance as music
 from dj_reachy.audio.music_dancer import MusicDancer
 
 
-def test_zero_music_intensity_really_disables_offsets(monkeypatch):
+def test_zero_music_intensity_really_disables_offsets(monkeypatch: pytest.MonkeyPatch) -> None:
     """Honor zero intensity rather than silently clamping it to nonzero motion."""
     offsets = []
     dancer = MusicDancer(lambda *values: offsets.append(values), intensity=0.2)
