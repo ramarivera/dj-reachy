@@ -18,100 +18,133 @@ def _build_handler(loop: asyncio.AbstractEventLoop) -> OpenaiRealtimeHandler:
 
 
 def test_format_timestamp_uses_wall_clock() -> None:
-    """Test that format_timestamp uses wall clock time."""
+    """Use wall-clock years rather than interpreting monotonic uptime as a date."""
     loop = asyncio.new_event_loop()
     try:
-        print("Testing format_timestamp...")
         handler = _build_handler(loop)
         formatted = handler.format_timestamp()
-        print(f"Formatted timestamp: {formatted}")
     finally:
         asyncio.set_event_loop(None)
         loop.close()
+    assert int(formatted[1:5]) == datetime.now(timezone.utc).year
 
-    # Extract year from "[YYYY-MM-DD ...]"
-    year = int(formatted[1:5])
-    assert year == datetime.now(timezone.utc).year
 
 @pytest.mark.asyncio
 async def test_start_up_retries_on_abrupt_close(monkeypatch: Any, caplog: Any) -> None:
-    """First connection dies with ConnectionClosedError during iteration -> retried.
-
-    Second connection iterates cleanly (no events) -> start_up returns without raising.
-    Ensures handler clears self.connection at the end.
-    """
+    """Reconnect explicit API sessions after an unexpected transport close."""
     caplog.set_level(logging.WARNING)
+    from dj_reachy.config import config
 
-    # Use a local Exception as the module's ConnectionClosedError to avoid ws dependency
-    FakeCCE = type("FakeCCE", (Exception,), {})
-    monkeypatch.setattr(rt_mod, "ConnectionClosedError", FakeCCE)
+    monkeypatch.setattr(config, "VOICE_BACKEND", "api_key")
+    monkeypatch.setattr(config, "OPENAI_API_KEY", "explicit-test-fixture")
+    monkeypatch.setattr(config, "VOICE_MODEL", "gpt-realtime")
+    fake_cce = type("FakeCCE", (Exception,), {})
+    monkeypatch.setattr(rt_mod, "ConnectionClosedError", fake_cce)
 
-    # Make asyncio.sleep return immediately (for backoff)
-    async def _fast_sleep(*_a: Any, **_kw: Any) -> None: return None
-    monkeypatch.setattr(asyncio, "sleep", _fast_sleep, raising=False)
+    async def fast_sleep(*_args: Any, **_kwargs: Any) -> None:
+        return None
 
+    monkeypatch.setattr(asyncio, "sleep", fast_sleep, raising=False)
     attempt_counter = {"n": 0}
 
     class FakeConn:
-        """Minimal realtime connection stub."""
-
         def __init__(self, mode: str):
             self._mode = mode
 
-            class _Session:
-                async def update(self, **_kw: Any) -> None: return None
-            self.session = _Session()
+            class Session:
+                async def update(self, **_kw: Any) -> None:
+                    return None
 
-            class _InputAudioBuffer:
-                async def append(self, **_kw: Any) -> None: return None
-            self.input_audio_buffer = _InputAudioBuffer()
+            class InputAudioBuffer:
+                async def append(self, **_kw: Any) -> None:
+                    return None
 
-            class _Item:
-                async def create(self, **_kw: Any) -> None: return None
+            class Item:
+                async def create(self, **_kw: Any) -> None:
+                    return None
 
-            class _Conversation:
-                item = _Item()
-            self.conversation = _Conversation()
+            class Conversation:
+                item = Item()
 
-            class _Response:
-                async def create(self, **_kw: Any) -> None: return None
-                async def cancel(self, **_kw: Any) -> None: return None
-            self.response = _Response()
+            class Response:
+                async def create(self, **_kw: Any) -> None:
+                    return None
 
-        async def __aenter__(self) -> "FakeConn": return self
-        async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool: return False
-        async def close(self) -> None: return None
+                async def cancel(self, **_kw: Any) -> None:
+                    return None
 
-        # Async iterator protocol
-        def __aiter__(self) -> "FakeConn": return self
+            self.session = Session()
+            self.input_audio_buffer = InputAudioBuffer()
+            self.conversation = Conversation()
+            self.response = Response()
+
+        async def __aenter__(self) -> "FakeConn":
+            return self
+
+        async def __aexit__(self, *_args: Any) -> bool:
+            return False
+
+        async def close(self) -> None:
+            return None
+
+        def __aiter__(self) -> "FakeConn":
+            return self
+
         async def __anext__(self) -> None:
             if self._mode == "raise_on_iter":
-                raise FakeCCE("abrupt close (simulated)")
-            raise StopAsyncIteration  # clean exit (no events)
+                raise fake_cce("abrupt close (simulated)")
+            raise StopAsyncIteration
 
     class FakeRealtime:
         def connect(self, **_kw: Any) -> FakeConn:
             attempt_counter["n"] += 1
-            mode = "raise_on_iter" if attempt_counter["n"] == 1 else "clean"
-            return FakeConn(mode)
+            return FakeConn("raise_on_iter" if attempt_counter["n"] == 1 else "clean")
 
     class FakeClient:
-        def __init__(self, **_kw: Any) -> None: self.realtime = FakeRealtime()
+        def __init__(self, **_kw: Any) -> None:
+            self.realtime = FakeRealtime()
 
-    # Patch the OpenAI client used by the handler
+        async def close(self) -> None:
+            return None
+
     monkeypatch.setattr(rt_mod, "AsyncOpenAI", FakeClient)
-
-    # Build handler with minimal deps
-    deps = ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock())
-    handler = rt_mod.OpenaiRealtimeHandler(deps)
-
-    # Run: should retry once and exit cleanly
+    handler = rt_mod.OpenaiRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
     await handler.start_up()
-
-    # Validate: two attempts total (fail -> retry -> succeed), and connection cleared
     assert attempt_counter["n"] == 2
     assert handler.connection is None
+    assert len([r for r in caplog.records if r.levelname == "WARNING" and "closed unexpectedly" in r.msg]) == 1
 
-    # Optional: confirm we logged the unexpected close once
-    warnings = [r for r in caplog.records if r.levelname == "WARNING" and "closed unexpectedly" in r.msg]
-    assert len(warnings) == 1
+
+@pytest.mark.asyncio
+async def test_slow_music_tool_does_not_block_later_control(monkeypatch: Any) -> None:
+    """An independent control task must finish while song work is suspended."""
+    handler = _build_handler(asyncio.get_running_loop())
+    gate = asyncio.Event()
+    completed: list[str] = []
+
+    async def dispatch(name: str, _args: str, _deps: Any) -> dict[str, str]:
+        if name == "make_song_and_dance":
+            await gate.wait()
+        completed.append(name)
+        return {"status": "ok"}
+
+    monkeypatch.setattr(rt_mod, "dispatch_tool_call", dispatch)
+
+    class Item:
+        async def create(self, **_kwargs: Any) -> None:
+            return None
+
+    class Response:
+        async def create(self, **_kwargs: Any) -> None:
+            return None
+
+    handler.connection = type(
+        "Conn", (), {"conversation": type("Conversation", (), {"item": Item()})(), "response": Response()}
+    )()
+    music = handler.schedule_tool_call("make_song_and_dance", "{}", "music-call")
+    await asyncio.sleep(0)
+    control = handler.schedule_tool_call("pause_music", "{}", "pause-call")
+    await asyncio.wait_for(control, timeout=1)
+    assert completed == ["pause_music"]
+    gate.set()
+    await asyncio.wait_for(music, timeout=1)

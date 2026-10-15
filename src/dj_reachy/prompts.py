@@ -1,5 +1,4 @@
 import re
-import sys
 import logging
 from pathlib import Path
 
@@ -60,45 +59,36 @@ def _expand_prompt_includes(content: str) -> str:
 
 
 def get_session_instructions() -> str:
-    """Get session instructions, loading from REACHY_MINI_CUSTOM_PROFILE if set."""
+    """Reload user-owned persona while keeping the app's confirmation policy."""
     profile = config.REACHY_MINI_CUSTOM_PROFILE
-    if not profile:
-        logger.info(f"Loading default prompt from {PROMPTS_LIBRARY_DIRECTORY / 'default_prompt.txt'}")
-        instructions_file = PROMPTS_LIBRARY_DIRECTORY / "default_prompt.txt"
-    else:
-        logger.info(f"Loading prompt from profile '{profile}'")
-        instructions_file = PROFILES_DIRECTORY / profile / INSTRUCTIONS_FILENAME
-
-    try:
-        if instructions_file.exists():
-            instructions = instructions_file.read_text(encoding="utf-8").strip()
-            if instructions:
-                # Expand [<name>] placeholders with content from prompts library
-                expanded_instructions = _expand_prompt_includes(instructions)
-                return expanded_instructions
-            logger.error(f"Profile '{profile}' has empty {INSTRUCTIONS_FILENAME}")
-            sys.exit(1)
-        logger.error(f"Profile {profile} has no {INSTRUCTIONS_FILENAME}")
-        sys.exit(1)
-    except Exception as e:
-        logger.error(f"Failed to load instructions from profile '{profile}': {e}")
-        sys.exit(1)
+    instructions_file = (
+        PROFILES_DIRECTORY / profile / INSTRUCTIONS_FILENAME
+        if profile else PROMPTS_LIBRARY_DIRECTORY / "default_prompt.txt"
+    )
+    instructions = _expand_prompt_includes(instructions_file.read_text(encoding="utf-8").strip())
+    user_instructions = config.APP_HOME / "instructions.md"
+    if user_instructions.is_symlink():
+        raise ValueError("user instructions cannot be a symbolic link")
+    if user_instructions.is_file():
+        persona = user_instructions.read_text(encoding="utf-8").strip()
+        if len(persona) > 12000:
+            raise ValueError("user instructions exceed 12000 characters")
+        if persona:
+            instructions += "\n\nUser personality preferences:\n" + persona
+    language = config.CONVERSATION_LANGUAGE
+    instructions += (
+        "\n\nApp policy: Obtain explicit user confirmation before any paid music generation. "
+        "Never generate another track automatically. Stop and pause requests take priority. "
+        "Conversation language and lyric language are independent settings. "
+        "Never change lyric language just because the conversation language changes."
+    )
+    instructions += (
+        "\nFollow the user's conversation language naturally."
+        if language == "auto" else f"\nSpeak naturally in {language} unless the user asks otherwise."
+    )
+    return instructions
 
 
 def get_session_voice(default: str = "cedar") -> str:
-    """Resolve the voice to use for the session.
-
-    If a custom profile is selected and contains a voice.txt, return its
-    trimmed content; otherwise return the provided default ("cedar").
-    """
-    profile = config.REACHY_MINI_CUSTOM_PROFILE
-    if not profile:
-        return default
-    try:
-        voice_file = PROFILES_DIRECTORY / profile / VOICE_FILENAME
-        if voice_file.exists():
-            voice = voice_file.read_text(encoding="utf-8").strip()
-            return voice or default
-    except Exception:
-        pass
-    return default
+    """Use the explicit conversation voice, never a singer or packaged override."""
+    return str(getattr(config, "VOICE_NAME", default))
