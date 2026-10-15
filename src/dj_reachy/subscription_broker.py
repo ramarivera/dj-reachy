@@ -24,6 +24,9 @@ import httpx
 from dj_reachy.subscription_voice import MAX_BODY, DEFAULT_MODEL, DEFAULT_VOICE, LIVE_ENDPOINT
 
 
+DEFAULT_PLANNER_MODEL = "gpt-6.1-sol"
+
+
 LIVE_INSTRUCTIONS = (
     "You are DJ Reachy. Converse naturally in the user's language. "
     "Delegate requests to make or sing songs, play saved songs, pause, resume, stop music, or dance to the client. "
@@ -113,7 +116,7 @@ class BrokerService:
         *,
         live_endpoint: str = LIVE_ENDPOINT,
         responses_endpoint: str = "https://chatgpt.com/backend-api/codex/responses",
-        planner_model: str = "gpt-5.3-codex",
+        planner_model: str = DEFAULT_PLANNER_MODEL,
     ):
         """Accept a pluggable resolver; endpoint overrides are for loopback fixtures."""
         self.resolver = resolver
@@ -266,7 +269,7 @@ def main() -> None:
         tls.load_cert_chain(args.tls_cert, args.tls_key)
     service = BrokerService(
         codex_file_resolver(Path(auth_file)),
-        planner_model=os.environ.get("DJ_REACHY_SUBSCRIPTION_PLANNER_MODEL", "gpt-5.3-codex"),
+        planner_model=os.environ.get("DJ_REACHY_SUBSCRIPTION_PLANNER_MODEL", DEFAULT_PLANNER_MODEL),
     )
     server = create_server(
         service, os.environ.get("DJ_REACHY_SUBSCRIPTION_BROKER_TOKEN", ""), host=args.host, port=args.port, tls=tls

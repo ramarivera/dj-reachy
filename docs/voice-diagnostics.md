@@ -53,6 +53,12 @@ Native capture and playback each have one owned worker and bounded handoff, rath
 
 A permanently stalled native operation cannot safely return through the app's unconditional media-close cleanup. If native teardown fails to quiesce within two seconds, the standalone app logs a critical error and terminates its own process with status 70 instead of claiming clean shutdown or closing resources under a live native call. Run this native path in its app process, not embedded in another long-lived Python host. A supervisor may restart it only under the user's session policy; termination is not proof of a neutral-pose reset or provider cancellation.
 
+## Unattended bounded tests
+
+Repeated tests within the established per-test caps do not need another approval or presence confirmation. Prefer locally synthesized speech injected through the installed media/voice path, with output captured silently and movement targets intercepted. Do not make the user repeat test phrases. Keep room microphone, physical speaker, camera and physical motion disabled for this synthetic qualification.
+
+Give every trial a fresh private sandbox and durable request ledger. Per trial, allow at most one subscription session of 120 seconds, four planning calls and one 10-second music generation. Reject API-key fallback and additional generation requests. Synthetic ASR, model replies and real tool results must be observed, never fabricated. Keep synthetic-path success separate from physical-device audibility. This permission does not authorize public exposure or account-credential transfer.
+
 ## Sustained speech-motion qualification
 
 Do not qualify progressive stutter with a short no-motion audio probe. Exercise the real `HeadWobbler`, `MovementManager`, inbound Opus decoder worker, adapter audio reader, handler queue, outbound Opus encoder and native media calls together. Use synthetic source/sink endpoints and intercepted robot targets when physical testing is not authorized. Supply inbound frames on an anchored 50 Hz clock, not a sleep-after-processing loop that silently reduces the workload as the app slows. Compare early and late cadence and queue depth over at least 60 seconds.

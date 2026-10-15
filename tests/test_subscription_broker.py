@@ -306,3 +306,39 @@ async def test_broker_client_reports_actionable_entitlement_without_provider_bod
                 await broker_request({"billing": "subscription", "sdp": "v=0\r\n"})
             assert "HTTP 403" in str(failure.value)
             assert "fixture-" not in str(failure.value)
+
+
+@pytest.mark.parametrize("override", [None, "explicit-fixture-model"])
+def test_broker_planner_defaults_to_supported_subscription_model(
+    monkeypatch: pytest.MonkeyPatch, override: str | None
+) -> None:
+    """Keep default and CLI selection aligned while preserving explicit overrides."""
+    import sys
+
+    import dj_reachy.subscription_broker as broker
+
+    def unused_credential() -> broker.CodexCredential:
+        raise AssertionError("Selector testing must not resolve credentials")
+
+    assert broker.BrokerService(unused_credential).planner_model == "gpt-6.1-sol"
+    explicit = broker.BrokerService(unused_credential, planner_model="explicit-fixture-model")
+    assert explicit.planner_model == "explicit-fixture-model"
+    observed: list[str] = []
+
+    class CapturedServer(Exception):
+        """Stop before any socket opens."""
+
+    def capture_server(service: broker.BrokerService, token: str, **kwargs: object) -> NoReturn:
+        observed.append(service.planner_model)
+        raise CapturedServer
+
+    monkeypatch.setenv("DJ_REACHY_CODEX_AUTH_FILE", "/nonexistent-fixture-auth.json")
+    if override is None:
+        monkeypatch.delenv("DJ_REACHY_SUBSCRIPTION_PLANNER_MODEL", raising=False)
+    else:
+        monkeypatch.setenv("DJ_REACHY_SUBSCRIPTION_PLANNER_MODEL", override)
+    monkeypatch.setattr(sys, "argv", ["subscription-broker"])
+    monkeypatch.setattr(broker, "create_server", capture_server)
+    with pytest.raises(CapturedServer):
+        broker.main()
+    assert observed == [override or "gpt-6.1-sol"]
