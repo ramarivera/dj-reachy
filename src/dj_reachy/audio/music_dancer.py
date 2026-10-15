@@ -5,14 +5,13 @@ then generates expressive full-body dance movements synchronized to the music.
 """
 
 from __future__ import annotations
-
 import math
 import time
 import logging
 import threading
-from dataclasses import dataclass, field
-from typing import Callable, Tuple
+from typing import Tuple, Callable
 from collections import deque
+from dataclasses import dataclass
 
 import numpy as np
 from numpy.typing import NDArray
@@ -72,6 +71,7 @@ class AudioAnalyzer:
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         sensitivity: float = 0.6,
     ):
+        """Initialize FFT bands and deterministic beat-tracking state."""
         self.sample_rate = sample_rate
         self.chunk_size = chunk_size
         self.sensitivity = sensitivity
@@ -109,6 +109,7 @@ class AudioAnalyzer:
 
         Returns:
             AudioFeatures with frequency bands, beat info, etc.
+
         """
         # Convert to float and handle stereo -> mono
         if audio.ndim == 2:
@@ -209,6 +210,7 @@ class DanceController:
     """Converts audio features to dance movements."""
 
     def __init__(self, style: DanceStyle | None = None, intensity: float = 0.7):
+        """Initialize the existing local movement controller and smoothing state."""
         self.style = style or DanceStyle()
         self.intensity = intensity
         self.dance_time = 0.0
@@ -222,8 +224,8 @@ class DanceController:
         self._smooth_antenna_r = 0.0
 
     def update_intensity(self, intensity: float) -> None:
-        """Update movement intensity (0.1 - 1.0)."""
-        self.intensity = max(0.1, min(1.0, intensity))
+        """Update movement intensity, including zero to disable movement."""
+        self.intensity = max(0.0, min(1.0, intensity))
 
     def reset(self) -> None:
         """Reset smoothed state."""
@@ -244,6 +246,7 @@ class DanceController:
 
         Returns:
             DanceMovement with all body part offsets
+
         """
         self.dance_time += dt
         style = self.style
@@ -339,6 +342,7 @@ class MusicDancer:
                 where head_offsets is (x, y, z, roll, pitch, yaw) in meters/radians
             sample_rate: Audio sample rate
             intensity: Initial movement intensity (0.1 - 1.0)
+
         """
         self._set_offsets = set_offsets_callback
         self._sample_rate = sample_rate
@@ -429,6 +433,7 @@ class MusicDancer:
 
         Args:
             audio: PCM audio data as int16 array (mono or stereo)
+
         """
         with self._lock:
             if not self._is_active or self._is_fading:
