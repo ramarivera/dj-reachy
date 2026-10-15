@@ -97,14 +97,18 @@ Traversal, symlinks, non-MP3 paths, FIFOs, and other special files are rejected.
 
 ## Offline verification
 
-The shared interpreter is read-only at `../venv`. The lane's isolated runner and red/green logs are outside the repository in `../sol61-lanes/music/`. For this checkout, run the full suite without inherited credentials or user state:
+The shared interpreter is read-only at `../venv`. The lane's isolated runners and red/green logs are outside the repository in `../sol61-lanes/music/`. Run the full suite inside a loopback-only network namespace, with resource and unraisable exceptions treated as errors:
 
 ```nu
-../venv/bin/python ../sol61-lanes/music/run.py full-suite-final pytest -q --tb=short
+../venv/bin/python ../sol61-lanes/music/strict_run.py full-strict unshare --user --map-root-user --net sh -c 'ip link set dev lo up && exec "$@"' dj-test ../venv/bin/python -m pytest -q tests -W error::ResourceWarning -W error::pytest.PytestUnraisableExceptionWarning -W error::pytest.PytestUnhandledThreadExceptionWarning
 ../venv/bin/python ../sol61-lanes/music/run.py music-smoke python ../sol61-lanes/music/smoke_music.py
 ```
 
-The runner assigns owned HOME, XDG roots, TMPDIR, HF_HOME, caches, DJ_REACHY_HOME and PYTHONPATH, strips the inherited environment, and disables Hugging Face networking and Gradio analytics. The smoke constructs the real `OpenaiRealtimeHandler` without starting a provider connection, dispatches the registered tools against loopback HTTP, decodes real MP3 with mpg123, and intercepts only audio output and motion callbacks. It exercises generation, pause, resume, stop, replay, deletion and stalled HTTP cancellation. No robot, microphone or speaker is initialized.
+`strict_run.py` assigns owned HOME, DJ_REACHY_HOME, CODEX_HOME, HERMES_HOME, all XDG roots including RUNTIME_DIR, TMPDIR, HF_HOME and caches. It strips inherited credentials, disables Hugging Face networking and Gradio analytics, and records the exact command and process exit code through pytest shutdown. Add `-X tracemalloc=15` before `-m pytest` to trace resource allocations. Passing assertions followed by a teardown failure aren't a successful gate.
+
+`tests/conftest.py` owns an isolated event-loop policy and its idle restore loop. Pytest-asyncio's runner otherwise implicitly creates that idle loop while saving the ambient policy; a later synchronous `asyncio.run()` can detach it. The fixture closes only the restore loop it created, then restores the previous policy. The subprocess regression checks every recorded real loop's `is_closed()` state after pytest teardown, independently of GC timing.
+
+The separate smoke constructs the real `OpenaiRealtimeHandler` without starting a provider connection, dispatches the registered tools against loopback HTTP, decodes real MP3 with mpg123, and intercepts only audio output and motion callbacks. It exercises generation, pause, resume, stop, replay, deletion and stalled HTTP cancellation. No robot, microphone or speaker is initialized.
 
 The inherited tool registry eagerly discovers subclasses during import. Import the app handler/core registry before importing the music tool directly, as the app entry point does. A fresh process that imports the music module first can hit the inherited circular-discovery issue. Registry refactoring belongs to the integration owner, not this file-owned lane. The loader also warns about control modules because these tool classes share the music module, although they register and dispatch successfully in app import order.
 
