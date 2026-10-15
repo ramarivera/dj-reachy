@@ -116,3 +116,12 @@ Coverage includes actual aiortc negotiation, bidirectional PCM with real AV fram
 The ChatGPT consumer endpoint and event dialect aren't a stable public third-party API contract. Matching Conduit's implementation doesn't guarantee that an account has ChatGPT Live access. Public Sign in with ChatGPT Responses support excludes audio and isn't proof of consumer Live entitlement. This adapter fails closed on billing mismatches, rejected signaling, incomplete SSE and invalid commands. Protocol changes require another source review and qualification.
 
 Conduit source revisions, attribution and the complete MIT notice ship in [`src/dj_reachy/static/conduit-voice-NOTICE.txt`](../src/dj_reachy/static/conduit-voice-NOTICE.txt). The Codex Responses request shape was checked against [openai/codex revision 922510f4d7570b42838e015787ed53abfa8761a1](https://github.com/openai/codex/tree/922510f4d7570b42838e015787ed53abfa8761a1/codex-rs/codex-api/src), especially `common.rs` and `endpoint/responses.rs`. The upstream Apache 2.0 license is unchanged.
+
+
+## Ordinary launches outside a test harness
+
+The robot's application-home `.env` must provide `DJ_REACHY_SUBSCRIPTION_BROKER_URL` and `DJ_REACHY_SUBSCRIPTION_BROKER_TOKEN`. The main app loads this file before opening voice. Keep it private and use only the scoped broker client credential, never the account's OAuth material. Leave the installed package's legacy provider `.env` unchanged.
+
+`deployment/run_broker.py` bridges a systemd `broker-token` credential into the ordinary broker CLI. `deployment/dj-reachy-subscription-broker.service` runs the host-owned virtual environment and bridge with a loopback-only listener on port 18766. Install the bridge under the host broker directory and the service in the user's systemd directory. The existing private SSH forward carries robot loopback requests to that host listener. Do not run the exhausted test-budget broker and the ordinary broker on the same port.
+
+The ordinary broker is idle until a client requests a session or plan. Starting it does not start robot capture or playback. It is not enabled at login by this setup. An application launch remains an explicit action. Keep test request caps in a separate disposable test broker and ledger; never reset a consumed ledger to make the ordinary app work.

@@ -1,0 +1,17 @@
+[Unit]
+Description=Private DJ Reachy subscription voice and app planner broker
+
+[Service]
+Type=simple
+UMask=0077
+NoNewPrivileges=true
+LoadCredential=broker-token:%h/.config/dj-reachy/broker-client.token
+Environment=DJ_REACHY_CODEX_AUTH_FILE=%h/.codex/auth.json
+Environment=DJ_REACHY_HOME=%h/.local/share/dj-reachy/host-broker/app-data
+Environment=DJ_REACHY_SUBSCRIPTION_PLANNER_MODEL=gpt-6.1-sol
+Environment=HF_HUB_OFFLINE=1
+Environment=GRADIO_ANALYTICS_ENABLED=False
+Environment=TMPDIR=%h/.local/share/dj-reachy/host-broker/tmp
+Restart=no
+TimeoutStopSec=10
+ExecStart=%h/.local/share/dj-reachy/host-broker/venv/bin/python -I %h/.local/share/dj-reachy/host-broker/run_broker.py --host 127.0.0.1 --port 18766
