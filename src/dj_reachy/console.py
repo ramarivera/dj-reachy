@@ -12,7 +12,6 @@ from fastapi.responses import FileResponse
 from starlette.staticfiles import StaticFiles
 
 from reachy_mini import ReachyMini
-from reachy_mini.media.media_manager import MediaBackend
 from dj_reachy.config import config
 from dj_reachy.openai_realtime import OpenaiRealtimeHandler
 from dj_reachy.runtime_settings import register_runtime_settings_routes
@@ -126,10 +125,12 @@ class LocalStream:
 
     def clear_audio_queue(self) -> None:
         """Drop queued hardware audio when playback is interrupted."""
-        if self._robot.media.backend == MediaBackend.GSTREAMER:
-            self._robot.media.audio.clear_player()
-        elif self._robot.media.backend in (MediaBackend.DEFAULT, MediaBackend.DEFAULT_NO_VIDEO):
-            self._robot.media.audio.clear_output_buffer()
+        audio = self._robot.media.audio
+        if audio is not None:
+            clear = getattr(audio, "clear_player", None) or getattr(audio, "clear_output_buffer", None)
+            if not callable(clear):
+                raise RuntimeError("The selected audio backend cannot flush its playback buffer")
+            clear()
         self.handler.output_queue = asyncio.Queue()
 
     async def record_loop(self) -> None:

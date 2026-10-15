@@ -134,6 +134,21 @@ def main() -> None:
     run(args)
 
 
+def _initialize_audio_only(robot: ReachyMini, *, prefer_gstreamer: bool) -> None:
+    """Attach SDK audio after NO_MEDIA construction, without creating a camera."""
+    from reachy_mini.media.media_manager import MediaBackend
+
+    media = robot.media
+    if media.audio is not None:
+        return
+    # SDK 1.12 maps legacy no-video backend names to LOCAL, which creates a
+    # camera. Start from NO_MEDIA and invoke only the SDK's audio initializer.
+    media.backend = MediaBackend.__members__.get("LOCAL") or (
+        MediaBackend.GSTREAMER_NO_VIDEO if prefer_gstreamer else MediaBackend.DEFAULT_NO_VIDEO
+    )
+    media._init_audio("INFO")
+
+
 def run(
     args: argparse.Namespace,
     robot: ReachyMini | None = None,
@@ -198,6 +213,10 @@ def run(
     if simulation and not args.gradio:
         robot.client.disconnect()
         raise SystemExit("Simulation requires --gradio.")
+    if args.no_camera and not args.gradio:
+        _initialize_audio_only(
+            robot, prefer_gstreamer=getattr(args, "wireless_version", False) and getattr(args, "on_device", False)
+        )
 
     camera_worker, _, vision_manager = handle_vision_stuff(args, robot)
     movement = MovementManager(current_robot=robot, camera_worker=camera_worker)
