@@ -119,16 +119,28 @@ async def test_synthetic_console_handler_track_path_keeps_channel_selection(
             stream._stop_event.set()
             return raw
 
+        def stop_recording(self) -> None:
+            pass
+
+        def stop_playing(self) -> None:
+            pass
+
     robot = MagicMock(spec=ReachyMini)
     robot.media = Media()
     stream = LocalStream(app, cast(ReachyMini, robot))
     connection = SubscriptionRealtimeAdapter(diagnostics=app.diagnostics).connect()
     connection._microphone = MicrophoneTrack(diagnostics=app.diagnostics)
     app.connection = connection
-    await stream.record_loop()
-    frame = await connection._microphone.recv()
-    assert bool(np.count_nonzero(frame.to_ndarray())) == (first_channel != 0)
-    await app.shutdown()
+    try:
+        await stream.record_loop()
+        frame = await connection._microphone.recv()
+        assert bool(np.count_nonzero(frame.to_ndarray())) == (first_channel != 0)
+    finally:
+        stream._closing = True
+        await stream._shutdown_audio()
+        await app.shutdown()
+    assert not stream._capture_io._thread.is_alive()
+    assert not stream._playback_io._thread.is_alive()
     events = records(tmp_path / "logs" / "audio-trace.jsonl")
     configuration = [event for event in events if event["event"] == "capture_configuration"]
     assert len(configuration) == 1

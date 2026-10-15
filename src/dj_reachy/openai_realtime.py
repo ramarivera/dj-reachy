@@ -20,7 +20,7 @@ from dj_reachy.config import config
 from dj_reachy.prompts import get_session_voice, get_session_instructions
 from dj_reachy.tools.core_tools import ToolDependencies, get_tool_specs, dispatch_tool_call
 from dj_reachy.audio_diagnostics import Phase, AudioDiagnostics
-from dj_reachy.subscription_voice import SubscriptionRealtimeAdapter, fast_control
+from dj_reachy.subscription_voice import SubscriptionRealtimeAdapter, fast_control, subscription_delegation
 
 
 logger = logging.getLogger(__name__)
@@ -70,7 +70,7 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
         self._seen_calls: set[str] = set()
         self._seen_delegations: set[str] = set()
         self._delegated_turns: set[int] = set()
-        self._turn_controls: dict[int, asyncio.Task[dict[str, Any]]] = {}
+        self._turn_controls: dict[int | str, asyncio.Task[dict[str, Any]]] = {}
         self._control_tasks: set[asyncio.Task[dict[str, Any]]] = set()
         self._song_task: asyncio.Task[Any] | None = None
         self._music_call_active = False
@@ -227,7 +227,7 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
         if self.deps.head_wobbler is not None:
             self.deps.head_wobbler.reset()
 
-    def _control_for_turn(self, turn: int, name: str) -> asyncio.Task[dict[str, Any]]:
+    def _control_for_turn(self, turn: int | str, name: str) -> asyncio.Task[dict[str, Any]]:
         existing = self._turn_controls.get(turn)
         if existing is not None:
             return existing
@@ -242,27 +242,38 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
         return task
 
     def schedule_subscription_delegation(self, event: Any) -> None:
-        """Own one current user turn per correlated client delegation, never model commentary."""
-        item = getattr(event, "item", {})
-        if not isinstance(item, dict) or item.get("type") != "delegation" or item.get("target") != "client":
+        """Schedule current user speech or an explicitly labeled Live model request."""
+        if self.connection is None or self._shutdown_requested:
             return
-        identity = item.get("id")
-        if not isinstance(identity, str) or not identity or identity in self._seen_delegations:
+        decoded = subscription_delegation(getattr(event, "item", None))
+        if decoded is None:
             return
-        self._seen_delegations.add(identity)
-        transcript = str(getattr(event, "transcript_context", "") or "").strip()
+        identity, request = decoded
+        if identity in self._seen_delegations:
+            return
+        value = getattr(event, "transcript_context", "")
+        transcript = value.strip() if isinstance(value, str) else ""
         turn = getattr(event, "turn_id", None)
-        # Delegation content can be absent or a model paraphrase. Only new user words authorize execution.
-        already_handled = isinstance(turn, int) and turn in self._delegated_turns
-        if isinstance(turn, int):
-            self._delegated_turns.add(turn)
-        if already_handled:
+        if isinstance(turn, int) and turn in self._delegated_turns:
             transcript = ""
-        control = fast_control(transcript)
-        control_task = self._control_for_turn(turn, control) if control and isinstance(turn, int) else None
-        task = asyncio.create_task(
-            self._run_subscription_delegation(identity, transcript, control_task), name=f"delegation-{identity}"
-        )
+        if not transcript and not request:
+            # An empty creation notice may be followed by the populated same-ID item.
+            return
+        if transcript and isinstance(turn, int):
+            self._delegated_turns.add(turn)
+        self._seen_delegations.add(identity)
+        control = fast_control(transcript or request)
+        correlation = turn if transcript and isinstance(turn, int) else f"delegation:{identity}"
+        control_task = self._control_for_turn(correlation, control) if control else None
+        if not transcript:
+            transcript = "Live model delegation request (not a verbatim user transcript):\n" + request
+        connection, epoch = self.connection, self._work_epoch
+
+        async def run() -> None:
+            if self._current(connection, epoch):
+                await self._run_subscription_delegation(identity, transcript, control_task)
+
+        task = asyncio.create_task(run(), name=f"delegation-{identity}")
         self._subscription_tasks[identity] = task
         if control is None:
             self._work_tasks.add(task)

@@ -64,7 +64,7 @@ def test_broker_auth_contains_credentials_and_preserves_consumer_contract() -> N
                         "sdp": "v=0\r\no=fixture\r\n",
                         "model": "gpt-live-1-codex",
                         "voice": "cove",
-                        "briefing": "Speak Spanish. Delegate app commands.",
+                        "briefing": "Speak Spanish. Greet the user briefly, then listen. Delegate app commands.",
                     },
                 )
                 assert response.status_code == 200
@@ -83,6 +83,8 @@ def test_broker_auth_contains_credentials_and_preserves_consumer_contract() -> N
                 assert request["session"]["delegation"] == {"type": "client"}
                 assert "tools" not in request["session"]
                 assert "Speak Spanish." in request["session"]["instructions"]
+                assert "Greet the user briefly, then listen." in request["session"]["instructions"]
+                assert "Do not greet first." not in request["session"]["instructions"]
                 for malformed in ({"billing": "api", "sdp": "v=0"}, {"billing": "subscription", "sdp": "x" * 70000}):
                     result = client.post(
                         broker + "/session", headers={"Authorization": f"Bearer {token}"}, json=malformed
@@ -216,9 +218,7 @@ def test_app_calls_reject_unbounded_or_unknown_commands() -> None:
             validate_app_call(name, args)
 
 
-def test_explicit_codex_fixture_resolver_never_uses_api_key(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_explicit_codex_fixture_resolver_never_uses_api_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Read only an injected fixture path, and reject an API-key or expired sign-in."""
     from dj_reachy.subscription_broker import BrokerError, codex_file_resolver
 
@@ -279,7 +279,7 @@ def test_non_ascii_bad_authorization_is_rejected_before_credentials() -> None:
 
 @pytest.mark.asyncio
 async def test_broker_client_reports_actionable_entitlement_without_provider_body(
-    monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Propagate the host's safe diagnosis while keeping OAuth and upstream bodies host-side."""
     from dj_reachy.subscription_voice import broker_request

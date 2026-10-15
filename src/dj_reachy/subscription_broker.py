@@ -30,7 +30,8 @@ LIVE_INSTRUCTIONS = (
     "The client has only bounded app tools, no shell, files, browsing or general agent. "
     "Ask for clarification for unsupported tasks. Never claim a command succeeded before its result arrives. "
     "Commentary is quiet state, not a new user request. Speakable context is a result to tell the user. "
-    "Wait for the user at startup. Do not greet first."
+    "Follow the startup behavior in the conversation instructions below. "
+    "If no startup behavior is specified, wait for the user."
 )
 
 

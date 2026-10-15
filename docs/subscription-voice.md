@@ -49,6 +49,14 @@ The equivalent async function is `await dj_reachy.subscription_voice.qualify_sub
 
 A rejection is final for that attempt. Check the host sign-in and account entitlement before asking for another attempt. This command doesn't start the robot application.
 
+## Required voice model
+
+The requested product is GPT-Live-1.1 with ChatGPT subscription authentication, not an API-key Realtime substitute. OpenAI's [GPT-Live-1.1 system card](https://deploymentsafety.openai.com/gpt-live-1-1) identifies it as the default for Plus and higher tiers, including Codex.
+
+The app requests `gpt-live-1-codex`. This is the default frameless selector in [current official Codex source](https://github.com/openai/codex/blob/aff92080f2b8d5f63a63b4ada7b92054287f237c/codex-rs/core/src/realtime_conversation.rs#L112-L113), not an invented `gpt-live-1.1-codex` selector. Official [ChatGPT-auth WebRTC tests](https://github.com/openai/codex/blob/aff92080f2b8d5f63a63b4ada7b92054287f237c/codex-rs/core/tests/suite/realtime_conversation.rs#L805-L992) also use the same subscription endpoint, `quicksilver=v2` header and client delegation shape as this adapter. The requested alias or a broker echo of it is not server attestation of the resolved model generation.
+
+OpenAI's [public Live documentation](https://developers.openai.com/api/docs/guides/live) and its consumer Codex implementation have different authentication and event contracts. Do not replace consumer event names with public API names, or switch to project API-key billing, just because both support WebRTC.
+
 ## App configuration and reconnect
 
 Use the existing app launch path and its runtime settings. The subscription voice group is:
@@ -80,7 +88,10 @@ The Live session uses consumer client delegation, not Realtime function tools. T
 
 Readiness requires `session.started` or `session.updated`, not merely an open data channel or valid SDP. Pending context waits for readiness. Each `delegation.context.append` or `session.context.append` carries at most 500 UTF-8 bytes in `content: [{"type":"input_text","text":"..."}]`. Delegation replies use `delegation_item_id`. Commentary is quiet progress/state; speakable context is a result to tell the user. PCM isn't evidence of a public `response.done` event. `trigger_response_and_wait()` returns false for consumer context delivery instead of claiming speech completion.
 
-The client associates `input_transcript.added`, user `turn.done`, and client `delegation.created` events with the current user turn. Completed delegation IDs and consumed turns aren't executed again. Model commentary and empty repeated delegations can't reauthorize old work. Full anchored stop/pause/resume commands bypass planning, and user `turn.done` can invoke them before a delegation arrives. An earlier pause isn't included in a later resume request.
+The client associates `input_transcript.added`, user `turn.done`, and client `delegation.created` events with the current request. A canonical client delegation may carry bounded `content: [{"type":"input_text","text":"..."}]` without a separate transcript event. The handler accepts that protocol request and labels it as model-authored delegation content, not verbatim user speech. Actual fresh user speech takes precedence when present. Empty notices reserve neither an ID nor a user turn, so a populated same-ID notice can still run; accepted IDs are deduplicated even while work is in flight. Distinct content-only requests have separate correlations. Assistant output/commentary is never a delegation request or evidence of user approval. App permissions, credit confirmations and argument validation still apply.
+
+Full anchored stop/pause/resume requests bypass planning, and user `turn.done` can invoke them before a delegation arrives. An earlier pause isn't included in a later resume request. Cancellation invalidates work before a delayed result can restart playback or speak through a replacement connection.
+
 
 General requests, including "sing me a ten-second salsa about robots", use the broker's subscription-backed Codex Responses planner at `https://chatgpt.com/backend-api/codex/responses`. `DJ_REACHY_SUBSCRIPTION_PLANNER_MODEL` on the host selects its model, default `gpt-5.3-codex`. There is no API-key planner fallback. Requests use `store: false`, `stream: true`, full per-request history and a `dj_reachy` function namespace. Only completed SSE responses can authorize commands. Tool call IDs and encrypted reasoning/history survive stateless tool rounds.
 

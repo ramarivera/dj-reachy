@@ -43,8 +43,18 @@ At shutdown, `run_summary` includes cumulative counts, per-boundary nonzero tota
 
 Energy is not proof of speech. Background noise is nonzero too. Do not invent a VAD or microphone-enable protocol change from the absence of a reply.
 
+## Hardware test conditions
+
+Preserve the user's existing speaker level unless a different level is explicitly needed and approved. A raw ALSA percentage is not a perceptual loudness percentage. On the inspected robot, the PCM mixer spans 0 to 60 with a linear -60 to 0 dB scale: setting 20% selects -48 dB, while the existing 88% setting reads -7 dB. Lowering to 20% made the test output nearly inaudible. Do not repeat that test setup or use the volume endpoint merely to check a value; its setter plays a sound.
+
+Check timing as well as energy. Native SDK capture can wait synchronously for a GStreamer sample, so it must not block the asyncio loop that owns WebRTC and controls. In a device-free on-robot probe, the actual SDK with a synthetic GStreamer source delivered the same 186 frames over three seconds in both modes; direct capture allowed 187 heartbeat ticks, while offloaded capture allowed 557. This isolates a scheduling cost, not the complete cause of the failed voice conversation. A separate observed live stream fell below real-time pacing despite nonzero samples.
+
+Native capture and playback each have one owned worker and bounded handoff, rather than running synchronous SDK calls on the voice loop. Flush invalidates queued PCM immediately, fences any already-running push, then clears the native buffer before accepting replacement audio. Cancellation does not pretend to terminate a native thread. Normal shutdown drains both directions before either media stop runs.
+
+A permanently stalled native operation cannot safely return through the app's unconditional media-close cleanup. If native teardown fails to quiesce within two seconds, the standalone app logs a critical error and terminates its own process with status 70 instead of claiming clean shutdown or closing resources under a live native call. Run this native path in its app process, not embedded in another long-lived Python host. A supervisor may restart it only under the user's session policy; termination is not proof of a neutral-pose reset or provider cancellation.
+
 ## Qualification limits
 
 Offline tests exercise synthetic stereo frames through the real native capture loop, handler selection/resampling/encoding, subscription append and microphone track. Loopback WebRTC tests check actual RTP statistics and cleanup. Privacy, rotation, rate limiting and owned-resource closure are tested separately.
 
-The failed physical session did not have these boundary logs, so its cause remains unproven. Installing this revision does not establish that live speech works. A new microphone/speaker test or subscription session requires fresh authorization and a bounded test window; do not automatically reconnect to gather more evidence.
+The first failed physical session lacked these boundary logs. A later instrumented run established nonzero capture on both channels, nonzero selected/encoded/track audio and outbound RTP progress, with late generated output but no usable response reported by the user. Do not present that as a successful physical conversation or a proven model-version problem. A new microphone/speaker test or subscription session requires fresh authorization and a bounded test window; do not automatically reconnect to gather more evidence.

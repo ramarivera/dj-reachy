@@ -1,12 +1,19 @@
 """Local audio loop and user-owned app-manager settings page."""
 
+import os
 import asyncio
 import logging
-from typing import Any
+import threading
+from queue import Queue
+from typing import Any, TypeVar, NoReturn, cast
 from pathlib import Path
+from collections.abc import Callable
+from concurrent.futures import Future
 
+import numpy as np
 from fastapi import FastAPI
 from fastrtc import AdditionalOutputs, audio_to_float32
+from numpy.typing import NDArray
 from scipy.signal import resample
 from fastapi.responses import FileResponse
 from starlette.staticfiles import StaticFiles
@@ -18,6 +25,68 @@ from dj_reachy.runtime_settings import register_runtime_settings_routes
 
 
 logger = logging.getLogger(__name__)
+_AudioResult = TypeVar("_AudioResult")
+
+
+class _AudioIO:
+    """One lazy daemon owner, one mailbox slot, and at most one native call.
+
+    Cancellation releases the async waiter, NOT the synchronous operation. The
+    retained future fences subsequent calls (including stop) until it completes.
+    No use of asyncio's executor: asyncio.run would join stalled executor threads.
+    """
+
+    def __init__(self, name: str) -> None:
+        self._mailbox: Queue[tuple[Callable[[], object], Future[object]] | None] = Queue(maxsize=1)
+        self._lock = asyncio.Lock()
+        self._pending: asyncio.Future[object] | None = None
+        self._thread = threading.Thread(target=self._run, name=name, daemon=True)
+        self._started = False
+        self._finished = False
+
+    async def _drain(self) -> None:
+        if self._pending is not None:
+            try:
+                await asyncio.shield(self._pending)
+            except Exception:
+                # The caller observes operation failures; stop must still run.
+                pass
+
+    def _run(self) -> None:
+        while (item := self._mailbox.get()) is not None:
+            operation, result = item
+            try:
+                result.set_result(operation())
+            except BaseException as exc:
+                result.set_exception(exc)
+
+    async def call(self, operation: Callable[[], _AudioResult]) -> _AudioResult:
+        """Apply backpressure and retain ownership across waiter cancellation."""
+        async with self._lock:
+            await self._drain()
+            if self._finished:
+                raise RuntimeError("Native audio owner has already stopped")
+            if not self._started:
+                self._thread.start()
+                self._started = True
+            result: Future[object] = Future()
+            self._pending = asyncio.wrap_future(result)
+            # Retrieve exceptions even if cancellation removes the only waiter.
+            self._pending.add_done_callback(lambda done: done.exception())
+            self._mailbox.put_nowait((operation, result))
+            return cast(_AudioResult, await asyncio.shield(self._pending))
+
+    async def finish(self) -> None:
+        """Drain the owned operation before asking the daemon owner to exit."""
+        async with self._lock:
+            await self._drain()
+            if self._finished:
+                return
+            self._finished = True
+            if self._started:
+                self._mailbox.put_nowait(None)
+                while self._thread.is_alive():
+                    await asyncio.sleep(0.001)
 
 
 class LocalStream:
@@ -37,6 +106,16 @@ class LocalStream:
         self._stop_event = asyncio.Event()
         self._tasks: list[asyncio.Task[None]] = []
         self._asyncio_loop: asyncio.AbstractEventLoop | None = None
+        self._runner_task: asyncio.Task[None] | None = None
+        self._closing = False
+        self._launched = False
+        self._media_started = False
+        self._play_epoch = 0
+        self._flushed_epoch = 0
+        self._flush_task: asyncio.Task[None] | None = None
+        self._emit_task: asyncio.Task[tuple[int, NDArray[np.int16]] | AdditionalOutputs | None] | None = None
+        self._capture_io = _AudioIO("native-audio-capture")
+        self._playback_io = _AudioIO("native-audio-playback")
         self.handler._clear_queue = self.clear_audio_queue
         self._settings_app = settings_app
         # instance_path is retained in the public constructor, never a storage root.
@@ -76,10 +155,13 @@ class LocalStream:
 
     def launch(self) -> None:
         """Run the explicitly selected voice backend, with no key-download fallback."""
-        self._stop_event.clear()
+        if self._launched:
+            raise RuntimeError("LocalStream owns a single native audio session")
+        self._launched = True
 
         async def runner() -> None:
             self._asyncio_loop = asyncio.get_running_loop()
+            self._runner_task = asyncio.current_task()
             try:
                 while config.VOICE_BACKEND == "api_key" and not config.OPENAI_API_KEY:
                     if self._stop_event.is_set():
@@ -88,8 +170,9 @@ class LocalStream:
                 if self._stop_event.is_set():
                     return
                 self.handler.diagnostics.start()
-                self._robot.media.start_recording()
-                self._robot.media.start_playing()
+                self._media_started = True
+                await self._capture_io.call(self._robot.media.start_recording)
+                await self._playback_io.call(self._robot.media.start_playing)
                 self._tasks = [
                     asyncio.create_task(self.handler.start_up(), name="voice-handler"),
                     asyncio.create_task(self.record_loop(), name="stream-record-loop"),
@@ -99,41 +182,120 @@ class LocalStream:
             except asyncio.CancelledError:
                 logger.info("Local audio session stopped")
             finally:
+                self._closing = True
+                self._stop_event.set()
                 for task in self._tasks:
                     task.cancel()
                 await asyncio.gather(*self._tasks, return_exceptions=True)
+                await self._shutdown_audio()
                 await self.handler.shutdown()
                 self._asyncio_loop = None
 
         asyncio.run(runner())
 
     def close(self) -> None:
-        """Stop media and cancel tasks on the session's owning event loop."""
-        for stop in (self._robot.media.stop_recording, self._robot.media.stop_playing):
-            try:
-                stop()
-            except Exception as exc:
-                logger.debug("Media shutdown: %s", type(exc).__name__)
+        """Request teardown; never race stop/close against an owned SDK call."""
 
         def cancel() -> None:
             self._stop_event.set()
-            for task in self._tasks:
-                task.cancel()
+            if not self._closing and self._runner_task is not None:
+                self._runner_task.cancel()
 
-        if self._asyncio_loop is not None:
-            self._asyncio_loop.call_soon_threadsafe(cancel)
+        loop = self._asyncio_loop
+        if loop is not None and not loop.is_closed():
+            loop.call_soon_threadsafe(cancel)
         else:
             self._stop_event.set()
 
     def clear_audio_queue(self) -> None:
-        """Drop queued hardware audio when playback is interrupted."""
+        """Invalidate PCM now; serialize the native flush after any in-flight push.
+
+        The handler/music contract is synchronous. Return means invalidated, not
+        that a blocked native push was interrupted: the one playback owner must
+        finish it, flush, and only then accept replacement-generation frames.
+        """
+        try:
+            caller_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            caller_loop = None
+        owner_loop = getattr(self, "_asyncio_loop", None)
+        if owner_loop is not None and caller_loop is not owner_loop:
+            if not owner_loop.is_closed():
+                owner_loop.call_soon_threadsafe(self.clear_audio_queue)
+            return
+        if getattr(self, "_closing", False):
+            return
         audio = self._robot.media.audio
+        clear = None
         if audio is not None:
             clear = getattr(audio, "clear_player", None) or getattr(audio, "clear_output_buffer", None)
             if not callable(clear):
                 raise RuntimeError("The selected audio backend cannot flush its playback buffer")
-            clear()
         self.handler.output_queue = asyncio.Queue()
+        if caller_loop is None:
+            # Pre-launch callers have no native owner or in-flight work.
+            if callable(clear):
+                clear()
+            return
+        self._play_epoch += 1
+        if self._emit_task is not None:
+            self._emit_task.cancel()
+        if self._flush_task is None or self._flush_task.done():
+            self._flush_task = asyncio.create_task(self._flush_output(clear), name="native-audio-flush")
+
+    async def _flush_output(self, clear: Callable[[], object] | None) -> None:
+        while self._flushed_epoch != self._play_epoch:
+            epoch = self._play_epoch
+            if clear is not None:
+                await self._playback_io.call(clear)
+            self._flushed_epoch = epoch
+
+    _IO_SHUTDOWN_TIMEOUT = 2.0
+
+    async def _shutdown_audio(self) -> None:
+        """Bound native shutdown without pretending cancellation kills threads."""
+        cleanup = asyncio.create_task(self._drain_and_stop_audio(), name="native-audio-shutdown")
+        done, _ = await asyncio.wait({cleanup}, timeout=self._IO_SHUTDOWN_TIMEOUT)
+        if not done:
+            self._native_io_stalled()
+        await cleanup
+
+    def _native_io_stalled(self) -> NoReturn:
+        """Terminate only at an unrecoverable native-stall boundary.
+
+        main.run's finally unconditionally closes media after launch returns, so
+        neither returning nor raising can safely leave a native SDK call alive.
+        Python cannot terminate a thread. A process supervisor must restart us;
+        do not replace this with to_thread cancellation or a fake clean shutdown.
+        """
+        logger.critical("Unrecoverable native audio I/O stall; terminating process before unsafe media close")
+        os._exit(70)
+
+    async def _drain_and_stop_audio(self) -> None:
+        """Drain native operations, then stop media on those same owners."""
+        if self._flush_task is not None:
+            self._flush_task.cancel()
+            await asyncio.gather(self._flush_task, return_exceptions=True)
+
+        async def stop(io: _AudioIO, operation: Callable[[], object]) -> None:
+            try:
+                if self._media_started:
+                    await io.call(operation)
+            finally:
+                await io.finish()
+
+        # Media managers may share a pipeline: quiesce BOTH directions before
+        # either stop can tear down shared native resources.
+        await asyncio.gather(self._capture_io._drain(), self._playback_io._drain())
+        results = await asyncio.gather(
+            stop(self._capture_io, self._robot.media.stop_recording),
+            stop(self._playback_io, self._robot.media.stop_playing),
+            return_exceptions=True,
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                logger.debug("Media shutdown: %s", type(result).__name__)
+        self._media_started = False
 
     async def record_loop(self) -> None:
         """Forward microphone frames to the active voice adapter."""
@@ -147,7 +309,7 @@ class LocalStream:
         except Exception:
             self.handler.diagnostics.capture_configuration_unavailable()
         while not self._stop_event.is_set():
-            audio_frame = self._robot.media.get_audio_sample()
+            audio_frame = await self._capture_io.call(self._robot.media.get_audio_sample)
             if audio_frame is not None:
                 self.handler.diagnostics.audio("capture", audio_frame, sample_rate)
                 await self.handler.receive((sample_rate, audio_frame))
@@ -156,22 +318,47 @@ class LocalStream:
             await asyncio.sleep(0.005)
 
     async def play_loop(self) -> None:
-        """Deliver assistant PCM to the existing local audio backend."""
-        while not self._stop_event.is_set():
-            output = await self.handler.emit()
-            if isinstance(output, AdditionalOutputs):
-                # Transcripts may contain secrets supplied by a user. Don't log them.
-                continue
-            if isinstance(output, tuple):
-                sample_rate, audio_data = output
-                output_rate = self._robot.media.get_output_audio_samplerate()
-                if audio_data.ndim == 2:
-                    if audio_data.shape[1] > audio_data.shape[0]:
-                        audio_data = audio_data.T
-                    if audio_data.shape[1] > 1:
-                        audio_data = audio_data[:, 0]
-                frame = audio_to_float32(audio_data)
-                if sample_rate != output_rate:
-                    frame = resample(frame, int(len(frame) * output_rate / sample_rate))
-                self._robot.media.push_audio_sample(frame)
-            await asyncio.sleep(0)
+        """Deliver ordered PCM through the single playback owner."""
+        try:
+            while not self._stop_event.is_set():
+                epoch = self._play_epoch
+                self._emit_task = asyncio.create_task(self.handler.emit())
+                try:
+                    output = await self._emit_task
+                except asyncio.CancelledError:
+                    current = asyncio.current_task()
+                    if current is not None and current.cancelling():
+                        raise
+                    # A flush replaced the queue while emit was waiting on it.
+                    continue
+                finally:
+                    self._emit_task = None
+                if epoch != self._play_epoch or isinstance(output, AdditionalOutputs):
+                    continue
+                if isinstance(output, tuple):
+                    sample_rate, audio_data = output
+                    output_rate = self._robot.media.get_output_audio_samplerate()
+                    if audio_data.ndim == 2:
+                        if audio_data.shape[1] > audio_data.shape[0]:
+                            audio_data = audio_data.T
+                        if audio_data.shape[1] > 1:
+                            audio_data = audio_data[:, 0]
+                    frame = audio_to_float32(audio_data)
+                    if sample_rate != output_rate:
+                        frame = resample(frame, int(len(frame) * output_rate / sample_rate))
+                    if self._flush_task is not None:
+                        await asyncio.shield(self._flush_task)
+
+                    def push() -> None:
+                        # The epoch can change while this call is waiting for its
+                        # native owner. A running push always precedes the flush.
+                        if epoch == self._play_epoch and not self._stop_event.is_set():
+                            self._robot.media.push_audio_sample(frame)
+
+                    await self._playback_io.call(push)
+                await asyncio.sleep(0)
+        finally:
+            if self._emit_task is not None:
+                self._emit_task.cancel()
+                await asyncio.gather(self._emit_task, return_exceptions=True)
+                self._emit_task = None

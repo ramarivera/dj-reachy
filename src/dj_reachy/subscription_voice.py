@@ -145,6 +145,35 @@ def build_context_messages(text: str, *, channel: str, delegation_id: str | None
     return messages
 
 
+def subscription_delegation(item: object) -> tuple[str, str] | None:
+    """Decode only bounded client delegation input text, never output commentary."""
+    if not isinstance(item, dict) or item.get("type") != "delegation" or item.get("target") != "client":
+        return None
+    identity = item.get("id")
+    if not isinstance(identity, str) or not identity.strip() or len(identity) > 200:
+        return None
+    content = item.get("content", [])
+    if not isinstance(content, list) or len(content) > 64:
+        return None
+    texts: list[str] = []
+    for part in content:
+        if (
+            not isinstance(part, dict)
+            or set(part) != {"type", "text"}
+            or part.get("type") != "input_text"
+            or not isinstance(part.get("text"), str)
+        ):
+            return None
+        texts.append(part["text"])
+    text = "\n".join(texts)
+    try:
+        if len(text) > 6000 or len(text.encode("utf-8")) > 12000:
+            return None
+    except UnicodeError:
+        return None
+    return identity, text.strip()
+
+
 def fast_control(text: str) -> str | None:
     """Recognize only complete immediate control commands, never historical substrings."""
     match = re.fullmatch(
@@ -210,6 +239,7 @@ class SubscriptionRealtimeConnection:
         self._current_input = ""
         self._turn_id = 0
         self._consumed_turn = -1
+        self._seen_delegations: set[str] = set()
         self._awaiting_final = False
         self._pc: Any = None
         self._channel: Any = None
@@ -469,9 +499,18 @@ class SubscriptionRealtimeConnection:
                 self._current_input = ""
                 self._awaiting_final = False
         elif kind == "delegation.created":
-            event.transcript_context = self._user_transcript if self._consumed_turn != self._turn_id else ""
-            self._consumed_turn = self._turn_id
-            self._current_input = ""
+            event.transcript_context = ""
+            decoded = subscription_delegation(getattr(event, "item", None))
+            if decoded is not None:
+                identity, request = decoded
+                if identity not in self._seen_delegations:
+                    transcript = self._user_transcript if self._consumed_turn != self._turn_id else ""
+                    if transcript.strip() or request:
+                        self._seen_delegations.add(identity)
+                        if transcript.strip():
+                            event.transcript_context = transcript
+                            self._consumed_turn = self._turn_id
+                            self._current_input = ""
         event.turn_id = self._turn_id
         return event
 

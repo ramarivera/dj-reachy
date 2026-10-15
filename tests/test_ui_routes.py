@@ -1,4 +1,5 @@
 """Exercise settings and playback through actual ASGI requests."""
+
 from __future__ import annotations
 import json
 import asyncio
@@ -24,6 +25,7 @@ def dashboard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Dashb
     from dj_reachy.config import config
     from dj_reachy.console import LocalStream
     from dj_reachy.tools.core_tools import ToolDependencies
+
     for key in tuple(vars(config)):
         monkeypatch.setattr(config, key, getattr(config, key))
     monkeypatch.setattr(config, "APP_HOME", tmp_path)
@@ -40,10 +42,12 @@ def dashboard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Dashb
     stream = LocalStream(handler, robot, settings_app=app, instance_path="/must-not-write")
     loop = asyncio.new_event_loop()
     started = threading.Event()
+
     def run_loop() -> None:
         asyncio.set_event_loop(loop)
         loop.call_soon(started.set)
         loop.run_forever()
+
     thread = threading.Thread(target=run_loop)
     thread.start()
     started.wait(5)
@@ -52,9 +56,20 @@ def dashboard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Dashb
         with TestClient(app) as client:
             yield client, handler, tmp_path
     finally:
-        loop.call_soon_threadsafe(loop.stop)
-        thread.join(5)
-        loop.close()
+
+        async def cleanup() -> None:
+            stream._closing = True
+            await stream._shutdown_audio()
+            await handler.shutdown()
+
+        try:
+            asyncio.run_coroutine_threadsafe(cleanup(), loop).result(timeout=5)
+        finally:
+            loop.call_soon_threadsafe(loop.stop)
+            thread.join(5)
+            loop.close()
+        assert not stream._capture_io._thread.is_alive()
+        assert not stream._playback_io._thread.is_alive()
 
 
 def test_controls_stop_actual_tool_queue_without_voice_or_provider(dashboard: Dashboard) -> None:
@@ -98,19 +113,24 @@ def test_credentials_are_private_and_never_returned_in_settings(dashboard: Dashb
     assert "fixture-secret" in (home / ".env").read_text()
     assert "fixture-secret" not in client.get("/api/dj-reachy/settings").text
     assert "fixture-secret" not in client.get("/api/dj-reachy/status").text
-    assert client.post("/api/dj-reachy/credentials", json={"provider": "openai", "key": "bad\nINJECTED=1"}).status_code == 400
+    assert (
+        client.post("/api/dj-reachy/credentials", json={"provider": "openai", "key": "bad\nINJECTED=1"}).status_code
+        == 400
+    )
 
 
 def test_generation_rejects_malformed_plans_before_any_provider_work(dashboard: Dashboard) -> None:
     """Malformed nested plans never reach the music executor."""
     client, _, _ = dashboard
     body: object
-    for body in ({"prompt": "test", "music_length_ms": True},
-                 {"prompt": "test", "composition_plan": {"chunks": []}},
-                 {"composition_plan": []},
-                 {"composition_plan": {"chunks": [None]}},
-                 {"prompt": {"nested": "invalid"}},
-                 {"prompt": "test", "api_key": "fixture-secret"}):
+    for body in (
+        {"prompt": "test", "music_length_ms": True},
+        {"prompt": "test", "composition_plan": {"chunks": []}},
+        {"composition_plan": []},
+        {"composition_plan": {"chunks": [None]}},
+        {"prompt": {"nested": "invalid"}},
+        {"prompt": "test", "api_key": "fixture-secret"},
+    ):
         response = client.post("/api/dj-reachy/music/generate", json=body)
         assert response.status_code == 400, response.text
         assert "fixture-secret" not in response.text
