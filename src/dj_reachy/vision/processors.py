@@ -12,6 +12,7 @@ import torch
 from numpy.typing import NDArray
 from transformers import AutoProcessor, AutoModelForImageTextToText
 from huggingface_hub import snapshot_download
+from transformers.generation.utils import GenerationMixin
 
 from dj_reachy.config import config
 
@@ -38,28 +39,50 @@ if TYPE_CHECKING:
 
         def batch_decode(self, generated_ids: torch.Tensor, *, skip_special_tokens: bool) -> list[str]: ...
 
-    class _VisionModel(Protocol):
-        def to(self, device: str) -> "_VisionModel": ...
 
-        def eval(self) -> "_VisionModel": ...
+class _VisionModelAdapter:
+    """Validate the dynamic model's generation interface and tensor output."""
 
-        def generate(
-            self,
-            *,
-            do_sample: bool,
-            max_new_tokens: int,
-            pad_token_id: int | list[int] | None,
-            **inputs: torch.Tensor,
-        ) -> torch.Tensor: ...
+    def __init__(self, model: object) -> None:
+        if not isinstance(model, torch.nn.Module) or not isinstance(model, GenerationMixin):
+            raise TypeError("Vision model must be a torch module with Transformers generation support")
+        self._module: torch.nn.Module = model
+        self._generator: GenerationMixin = model
 
-    class _VisionModelLoader(Protocol):
-        def __call__(
-            self,
-            model_path: str,
-            *,
-            dtype: torch.dtype,
-            _attn_implementation: str = ...,
-        ) -> _VisionModel: ...
+    def to(self, device: str) -> "_VisionModelAdapter":
+        return _VisionModelAdapter(self._module.to(device))
+
+    def eval(self) -> "_VisionModelAdapter":
+        self._module.eval()
+        return self
+
+    def generate(
+        self,
+        *,
+        do_sample: bool,
+        max_new_tokens: int,
+        pad_token_id: int | list[int] | None,
+        **inputs: torch.Tensor,
+    ) -> torch.Tensor:
+        # Bind non-tensor generation controls to their SDK defaults before expanding model tensors.
+        generated = self._generator.generate(
+            **inputs,
+            generation_config=None,
+            logits_processor=None,
+            stopping_criteria=None,
+            prefix_allowed_tokens_fn=None,
+            synced_gpus=None,
+            assistant_model=None,
+            streamer=None,
+            use_model_defaults=None,
+            custom_generate=None,
+            do_sample=do_sample,
+            max_new_tokens=max_new_tokens,
+            pad_token_id=pad_token_id,
+        )
+        if not isinstance(generated, torch.Tensor):
+            raise TypeError("Vision model generation must return a tensor of token IDs")
+        return generated
 
 
 @dataclass
@@ -84,7 +107,7 @@ class VisionProcessor:
         self.model_path = self.vision_config.model_path
         self.device = self._determine_device()
         self.processor: _VisionInputProcessor | None = None
-        self.model: _VisionModel | None = None
+        self.model: _VisionModelAdapter | None = None
         self._initialized = False
 
     def _determine_device(self) -> str:
@@ -122,8 +145,8 @@ class VisionProcessor:
                 model_kwargs["_attn_implementation"] = "flash_attention_2"
 
             # Load model weights
-            load_model: _VisionModelLoader = AutoModelForImageTextToText.from_pretrained
-            self.model = load_model(self.model_path, **model_kwargs).to(self.device)
+            model = AutoModelForImageTextToText.from_pretrained(self.model_path, **model_kwargs)
+            self.model = _VisionModelAdapter(model).to(self.device)
 
             if self.model is not None:
                 self.model.eval()

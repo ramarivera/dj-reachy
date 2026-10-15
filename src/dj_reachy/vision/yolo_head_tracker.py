@@ -8,7 +8,7 @@ from numpy.typing import NDArray
 
 try:
     from supervision import Detections
-    from ultralytics import YOLO
+    from ultralytics.models.yolo.model import YOLO
 except ImportError as e:
     raise ImportError(
         "To use YOLO head tracker, please install the extra dependencies: pip install '.[yolo_vision]'",
