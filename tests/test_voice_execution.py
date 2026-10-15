@@ -200,8 +200,9 @@ async def test_shutdown_owns_in_progress_webrtc_handshake(monkeypatch):
         await asyncio.gather(running, return_exceptions=True)
 
 
+@pytest.mark.parametrize("ui_thread", [False, True], ids=["owner-loop", "ui-loop"])
 @pytest.mark.asyncio
-async def test_explicit_reconnect_replaces_real_webrtc_without_duplicate_receiver(monkeypatch):
+async def test_explicit_reconnect_replaces_real_webrtc_without_duplicate_receiver(monkeypatch, ui_thread):
     """Reload uses the supervisor, closes the previous peer, and negotiates fresh state."""
     import json
 
@@ -234,7 +235,10 @@ async def test_explicit_reconnect_replaces_real_webrtc_without_duplicate_receive
     try:
         await asyncio.wait_for(app._connected_event.wait(), 3)
         first = app.connection
-        await app.reload_instructions()
+        if ui_thread:
+            await asyncio.wait_for(asyncio.to_thread(lambda: asyncio.run(app.reload_instructions())), 4)
+        else:
+            await app.reload_instructions()
         assert len(peers) == 2
         assert app.connection is not first
         assert first._pc.connectionState == "closed"

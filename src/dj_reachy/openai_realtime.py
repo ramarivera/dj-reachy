@@ -509,6 +509,10 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
         """Request one supervised reconnect without launching a second receiver."""
         if self._supervisor is None or self._supervisor.done():
             raise RuntimeError("Voice supervisor is not running; start the handler before reconnecting")
+        owner_loop = self._supervisor.get_loop()
+        if owner_loop is not asyncio.get_running_loop():
+            await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(self._restart_session(), owner_loop))
+            return
         self._restart_requested = True
         self._connected_event.clear()
         if self.connection is not None:
