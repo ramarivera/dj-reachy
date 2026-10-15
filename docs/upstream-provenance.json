@@ -1,0 +1,38 @@
+{
+  "upstream": "https://huggingface.co/spaces/mzurki/dj-reachy",
+  "upstream_commit": "6dc20058f403c25a3f3f51778a466bc2945efd1f",
+  "license": "Apache-2.0",
+  "github_import": "History-preserving derivative; upstream is not hosted on GitHub",
+  "ordinary_git_assets": [
+    {
+      "path": "docs/assets/conversation_app_arch.svg",
+      "bytes": 122009,
+      "sha256": "2d3251bc98d5a0bf1d41d0332b76e7e86496745b2a0999f228b7d8647dd453a2",
+      "source_url": "https://huggingface.co/spaces/mzurki/dj-reachy/resolve/6dc20058f403c25a3f3f51778a466bc2945efd1f/docs/assets/conversation_app_arch.svg"
+    },
+    {
+      "path": "docs/assets/dj-reachy.mp4",
+      "bytes": 3999168,
+      "sha256": "7a0963cc7860e9e066342b4f2e4e7440de0956bfcb0e1fe6c1b4bd44a5e80c79",
+      "source_url": "https://huggingface.co/spaces/mzurki/dj-reachy/resolve/6dc20058f403c25a3f3f51778a466bc2945efd1f/docs/assets/dj-reachy.mp4"
+    },
+    {
+      "path": "docs/assets/reachy_mini_dance.gif",
+      "bytes": 3930400,
+      "sha256": "75914c3cb7af982e0b1c6369e25fc46d8c08a0ab5ad022240ae9c1a0d93967c3",
+      "source_url": "https://huggingface.co/spaces/mzurki/dj-reachy/resolve/6dc20058f403c25a3f3f51778a466bc2945efd1f/docs/assets/reachy_mini_dance.gif"
+    },
+    {
+      "path": "src/dj_reachy/images/reachymini_avatar.png",
+      "bytes": 1228716,
+      "sha256": "5a63ac8802ff3542f01292c431c5278296880d74cd3580d219fcf4827bc235f9",
+      "source_url": "https://huggingface.co/spaces/mzurki/dj-reachy/resolve/6dc20058f403c25a3f3f51778a466bc2945efd1f/src/dj_reachy/images/reachymini_avatar.png"
+    },
+    {
+      "path": "src/dj_reachy/images/user_avatar.png",
+      "bytes": 1111878,
+      "sha256": "e97ca125a86bacdaa41c8dca88abd9ca746fd5c9391eda24249c012432b0219b",
+      "source_url": "https://huggingface.co/spaces/mzurki/dj-reachy/resolve/6dc20058f403c25a3f3f51778a466bc2945efd1f/src/dj_reachy/images/user_avatar.png"
+    }
+  ]
+}
