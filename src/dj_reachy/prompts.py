@@ -61,6 +61,14 @@ def _expand_prompt_includes(content: str) -> str:
 
 def get_session_instructions() -> str:
     """Get session instructions, loading from REACHY_MINI_CUSTOM_PROFILE if set."""
+    user_instructions = config.APP_HOME / "instructions.md"
+    if user_instructions.is_file():
+        text = user_instructions.read_text(encoding="utf-8").strip()
+        if text:
+            language = getattr(config, "CONVERSATION_LANGUAGE", "auto")
+            if language != "auto":
+                text += f"\n\nSpeak naturally in {language} unless the user asks otherwise."
+            return text
     profile = config.REACHY_MINI_CUSTOM_PROFILE
     if not profile:
         logger.info(f"Loading default prompt from {PROMPTS_LIBRARY_DIRECTORY / 'default_prompt.txt'}")
@@ -92,6 +100,7 @@ def get_session_voice(default: str = "cedar") -> str:
     trimmed content; otherwise return the provided default ("cedar").
     """
     profile = config.REACHY_MINI_CUSTOM_PROFILE
+    default = getattr(config, "VOICE_NAME", default)
     if not profile:
         return default
     try:

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
-from pathlib import Path
+import os
+import tempfile
 from typing import Any
 
 import gradio as gr
@@ -21,6 +22,7 @@ class DJReachyUI:
     def __init__(self) -> None:
         """Initialize the DJReachyUI instance."""
         self._songs_dir = config.SONGS_DIR
+        self._selected_filename: str | None = None
 
         # Components (initialized in create_components)
         self.songs_list: gr.Dataframe
@@ -30,34 +32,40 @@ class DJReachyUI:
         self.song_audio: gr.Audio
         self.dance_intensity: gr.Slider
         self.status_md: gr.Markdown
+        self.play_btn: gr.Button
+        self.pause_btn: gr.Button
+        self.resume_btn: gr.Button
+        self.stop_btn: gr.Button
 
     def _get_songs_metadata(self) -> dict:
-        """Load songs metadata from JSON file."""
+        """Load metadata only from a regular file inside the owned library."""
         meta_path = self._songs_dir / "metadata.json"
-        if meta_path.exists():
-            try:
-                return json.loads(meta_path.read_text(encoding="utf-8"))
-            except Exception:
-                pass
-        return {}
+        try:
+            if meta_path.is_symlink() or meta_path.resolve(strict=True).parent != self._songs_dir.resolve(strict=True):
+                return {}
+            return json.loads(meta_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {}
+        except (OSError, RuntimeError, json.JSONDecodeError):
+            return {}
 
     def _list_songs(self) -> list[list[str]]:
-        """Get list of songs with metadata."""
+        """Get regular MP3 tracks with their saved metadata."""
         songs = []
         metadata = self._get_songs_metadata()
-        
         if self._songs_dir.exists():
-            for f in sorted(self._songs_dir.glob("*.mp3"), key=lambda x: x.stat().st_mtime, reverse=True):
-                stat = f.stat()
-                name = f.stem
+            for song_path in sorted(self._songs_dir.glob("*.mp3"), key=lambda item: item.name, reverse=True):
+                try:
+                    if song_path.is_symlink() or song_path.resolve(strict=True).parent != self._songs_dir.resolve(strict=True):
+                        continue
+                    stat = song_path.stat()
+                except (OSError, RuntimeError):
+                    continue
+                name = song_path.stem
                 parts = name.split("_", 1)
-                timestamp = parts[0] if parts[0].isdigit() else ""
                 default_title = parts[1].replace("_", " ") if len(parts) > 1 else name
-                
-                song_meta = metadata.get(f.name, {})
+                song_meta = metadata.get(song_path.name, {})
                 title = song_meta.get("title", default_title)
-                
-                # Format size
                 size_bytes = stat.st_size
                 if size_bytes < 1024:
                     size_str = f"{size_bytes} B"
@@ -65,40 +73,59 @@ class DJReachyUI:
                     size_str = f"{size_bytes / 1024:.1f} KB"
                 else:
                     size_str = f"{size_bytes / (1024 * 1024):.1f} MB"
-                
-                songs.append([f.name, title, size_str])
-        
+                songs.append([song_path.name, title, size_str])
         return songs if songs else [["", "No songs yet. Ask DJ Reachy to make you a song!", ""]]
 
     def _get_song_path(self, filename: str) -> str | None:
-        """Get full path to a song file."""
-        if not filename:
+        """Resolve only regular MP3 tracks directly inside the library."""
+        if not filename or Path(filename).name != filename:
             return None
         song_path = self._songs_dir / filename
-        if song_path.exists() and song_path.suffix == ".mp3":
-            return str(song_path)
-        return None
+        if song_path.is_symlink() or song_path.suffix.lower() != ".mp3" or not song_path.is_file():
+            return None
+        try:
+            if song_path.resolve(strict=True).parent != self._songs_dir.resolve(strict=True):
+                return None
+        except (OSError, RuntimeError):
+            return None
+        return str(song_path)
 
     def _delete_song(self, filename: str) -> tuple[list[list[str]], str]:
         """Delete a song file."""
         if not filename:
             return self._list_songs(), "No song selected"
         
-        song_path = self._songs_dir / filename
-        if song_path.exists() and song_path.suffix == ".mp3":
+        song_path_value = self._get_song_path(filename)
+        if song_path_value:
+            song_path = Path(song_path_value)
+            metadata_path = self._songs_dir / "metadata.json"
             try:
+                if metadata_path.is_symlink():
+                    return self._list_songs(), "Metadata file is a symlink; track was not deleted."
+                if metadata_path.exists() and metadata_path.resolve(strict=True).parent != self._songs_dir.resolve(strict=True):
+                    return self._list_songs(), "Metadata file is outside the library; track was not deleted."
+                sidecar = song_path.with_suffix(".json")
+                if sidecar.exists() and sidecar.resolve(strict=True).parent != self._songs_dir.resolve(strict=True):
+                    return self._list_songs(), "Track metadata is outside the library; track was not deleted."
                 song_path.unlink()
-                # Also remove from metadata
+                sidecar.unlink(missing_ok=True)
                 metadata = self._get_songs_metadata()
                 if filename in metadata:
                     del metadata[filename]
-                    meta_path = self._songs_dir / "metadata.json"
-                    meta_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+                    fd, temp_name = tempfile.mkstemp(prefix=".metadata.", suffix=".tmp", dir=self._songs_dir)
+                    try:
+                        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                            json.dump(metadata, stream, indent=2)
+                            stream.flush()
+                            os.fsync(stream.fileno())
+                        os.replace(temp_name, metadata_path)
+                    finally:
+                        Path(temp_name).unlink(missing_ok=True)
                 logger.info("Deleted song: %s", filename)
-                return self._list_songs(), f"✅ Deleted: {filename}"
-            except Exception as e:
-                logger.warning("Failed to delete song %s: %s", filename, e)
-                return self._list_songs(), f"❌ Failed to delete: {e}"
+                return self._list_songs(), f"Deleted: {filename}"
+            except (OSError, RuntimeError) as exc:
+                logger.warning("Failed to delete song %s: %s", filename, type(exc).__name__)
+                return self._list_songs(), "Failed to delete the saved track."
         return self._list_songs(), "❌ Song not found"
 
     def _get_dance_intensity(self) -> float:
@@ -112,17 +139,17 @@ class DJReachyUI:
             return 80  # Default 80%
 
     def _set_dance_intensity(self, slider_value: float) -> str:
-        """Set dance intensity from slider value (0-100)."""
+        """Persist bounded motion intensity and apply it to the active dancer."""
         try:
+            from dj_reachy.config import update_runtime_settings
             from dj_reachy.profiles.dj_reachy.make_song_and_dance import set_dance_intensity
-            # Convert slider (0-100) to internal (0-0.25)
-            internal = slider_value / 400
-            set_dance_intensity(internal)
-            logger.info("Set dance intensity to %.2f (slider: %d%%)", internal, int(slider_value))
-            return f"✅ Dance intensity: {int(slider_value)}%"
-        except Exception as e:
-            logger.warning("Failed to set dance intensity: %s", e)
-            return f"❌ Failed: {e}"
+            intensity = max(0.0, min(100.0, float(slider_value))) / 400.0
+            update_runtime_settings({"motion": {"intensity": intensity}})
+            set_dance_intensity(intensity)
+            return f"Dance intensity: {int(slider_value)}%"
+        except Exception as exc:
+            logger.warning("Failed to save dance intensity: %s", type(exc).__name__)
+            return "Failed to save dance intensity."
 
     def create_components(self) -> None:
         """Instantiate Gradio components for the DJ UI."""
@@ -201,7 +228,8 @@ class DJReachyUI:
                 return None, "No valid song selected"
             path = self._get_song_path(filename)
             if path:
-                return path, f"🎵 Playing: {title}"
+                self._selected_filename = filename
+                return path, f"🎵 Selected: {title}. Press Play to send it to Reachy."
             return None, "❌ Song file not found"
 
         def _delete_selected(songs_data, evt: gr.SelectData | None) -> tuple[list[list[str]], str]:
@@ -229,6 +257,27 @@ class DJReachyUI:
         def _update_intensity(value: float) -> str:
             return self._set_dance_intensity(value)
 
+        async def _play_selected() -> str:
+            if not self._selected_filename:
+                return "Select a saved track first."
+            from dj_reachy.tools.core_tools import dispatch_tool_call
+            result = await dispatch_tool_call(
+                "play_saved_song", json.dumps({"filename": self._selected_filename}), handler.deps
+            )
+            return str(result.get("status") or result.get("error") or "Playback finished.")
+
+        async def _music_control(tool_name: str) -> str:
+            from dj_reachy.tools.core_tools import dispatch_tool_call
+            result = await dispatch_tool_call(tool_name, "{}", handler.deps)
+            return str(result.get("status") or result.get("message") or result.get("error") or "Done.")
+
+        def _delete_current() -> tuple[list[list[str]], str]:
+            if not self._selected_filename:
+                return self._list_songs(), "Select a saved track first."
+            rows, status = self._delete_song(self._selected_filename)
+            self._selected_filename = None
+            return rows, status
+
         with blocks:
             # Refresh button
             self.refresh_btn.click(
@@ -250,6 +299,11 @@ class DJReachyUI:
                 inputs=[self.dance_intensity],
                 outputs=[self.status_md],
             )
+            self.play_btn.click(fn=_play_selected, inputs=[], outputs=[self.status_md])
+            self.pause_btn.click(fn=lambda: _music_control("pause_music"), inputs=[], outputs=[self.status_md])
+            self.resume_btn.click(fn=lambda: _music_control("resume_music"), inputs=[], outputs=[self.status_md])
+            self.stop_btn.click(fn=lambda: _music_control("stop_music"), inputs=[], outputs=[self.status_md])
+            self.delete_btn.click(fn=_delete_current, inputs=[], outputs=[self.songs_list, self.status_md])
 
             # Load initial song list on page load
             blocks.load(

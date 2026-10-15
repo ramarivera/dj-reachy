@@ -1,3 +1,7 @@
 dance
 stop_dance
 make_song_and_dance
+pause_music
+resume_music
+stop_music
+play_saved_song

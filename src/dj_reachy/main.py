@@ -6,6 +6,7 @@ import time
 import asyncio
 import argparse
 import threading
+import tempfile
 from typing import Any, Dict, List, Optional
 
 import gradio as gr
@@ -66,6 +67,19 @@ def run(
                     config.ELEVENLABS_API_KEY = new_el_key
         except Exception as e:
             print(f"Warning: Failed to load instance .env: {e}")
+    from dj_reachy.config import apply_runtime_settings, config
+    from dj_reachy.runtime_settings import RuntimeSettingsStore, register_runtime_settings_routes
+    runtime_settings_path = Path(instance_path) / "settings.json" if instance_path else config.RUNTIME_SETTINGS_PATH
+    runtime_store = RuntimeSettingsStore(runtime_settings_path)
+    config.RUNTIME_SETTINGS_PATH = runtime_settings_path
+    from dj_reachy import config as config_module
+    config_module.runtime_settings_store = runtime_store
+    apply_runtime_settings(runtime_store.read())
+    settings_app = settings_app or FastAPI()
+    register_runtime_settings_routes(settings_app, runtime_settings_path)
+    if instance_path:
+        config.APP_HOME = Path(instance_path)
+        config.SONGS_DIR = config.APP_HOME / "songs"
     
     # Putting these dependencies here makes the dashboard faster to load when the conversation app is installed
     from dj_reachy.moves import MovementManager
@@ -194,46 +208,150 @@ def run(
         # Now add DJ UI components inside the Stream's Blocks context
         dj_ui = DJReachyUI()
         with stream_manager:
-            with gr.Accordion("🎵 Song Library & Dance Settings", open=True):
+            with gr.Accordion("🎵 Song library and playback", open=True):
                 with gr.Row():
                     with gr.Column(scale=2):
                         dj_ui.songs_list = gr.Dataframe(
                             headers=["Filename", "Title", "Size"],
                             datatype=["str", "str", "str"],
                             value=dj_ui._list_songs(),
-                            label="🎵 Song Library",
+                            label="Saved tracks",
                             interactive=False,
                             wrap=True,
                         )
                         with gr.Row():
-                            dj_ui.refresh_btn = gr.Button("🔄 Refresh", variant="secondary", size="sm")
+                            dj_ui.refresh_btn = gr.Button("Refresh", variant="secondary", size="sm")
+                            dj_ui.play_btn = gr.Button("Play selected", variant="primary", size="sm")
+                            dj_ui.delete_btn = gr.Button("Delete selected", variant="stop", size="sm")
                     with gr.Column(scale=1):
+                        with gr.Row():
+                            dj_ui.pause_btn = gr.Button("Pause")
+                            dj_ui.resume_btn = gr.Button("Resume")
+                            dj_ui.stop_btn = gr.Button("Stop", variant="stop")
                         dj_ui.dance_intensity = gr.Slider(
-                            label="🎚️ Dance Intensity",
-                            minimum=0,
-                            maximum=100,
-                            value=dj_ui._get_dance_intensity(),
-                            step=1,
-                            info="Control dance movement intensity",
+                            label="Dance intensity", minimum=0, maximum=100,
+                            value=dj_ui._get_dance_intensity(), step=1,
                         )
                         dj_ui.status_md = gr.Markdown(value="", visible=True)
-                        dj_ui.song_audio = gr.Audio(
-                            label="🔊 Now Playing",
-                            type="filepath",
-                            interactive=False,
-                            visible=True,
-                            autoplay=True,
-                        )
+                        dj_ui.song_audio = gr.Audio(label="Track preview", type="filepath",
+                                                    interactive=False, visible=True, autoplay=False)
 
-        # Wire DJ UI events
+            with gr.Accordion("Music generation", open=False):
+                music_prompt = gr.Textbox(label="Prompt", lines=3, placeholder="Describe the song to generate.")
+                composition_plan = gr.Textbox(label="Versioned composition plan JSON (optional)", lines=5)
+                music_model = gr.Dropdown(
+                    choices=["music_v1", "music_v2", "music_v2_5"], value=config.MUSIC_MODEL_ID,
+                    label="Eleven Music model",
+                )
+                music_duration = gr.Slider(
+                    minimum=3, maximum=600, step=1, value=config.ELEVEN_MUSIC_LENGTH_MS // 1000,
+                    label="Duration (seconds)",
+                )
+                positive_styles = gr.Textbox(value=", ".join(config.MUSIC_POSITIVE_STYLES), label="Styles")
+                negative_styles = gr.Textbox(value=", ".join(config.MUSIC_NEGATIVE_STYLES), label="Excluded styles")
+                music_lyrics = gr.Textbox(value=config.MUSIC_LYRICS, label="Original lyrics", lines=4)
+                music_language = gr.Textbox(value=config.MUSIC_LANGUAGE, label="Lyric language (auto or language name)")
+                force_instrumental = gr.Checkbox(value=config.MUSIC_FORCE_INSTRUMENTAL, label="Force instrumental (prompt mode)")
+                generate_music_btn = gr.Button("Generate and play", variant="primary")
+
+            with gr.Accordion("Voice, billing, and motion settings", open=False):
+                voice_backend = gr.Dropdown(
+                    choices=[("ChatGPT subscription Live", "subscription"), ("OpenAI API-key Realtime", "api_key")],
+                    value=config.VOICE_BACKEND, label="Voice backend and billing",
+                )
+                voice_model = gr.Textbox(value=config.VOICE_MODEL, label="Realtime model")
+                voice_name = gr.Textbox(value=config.VOICE_NAME, label="Conversational voice (not the Eleven singer)")
+                conversation_language = gr.Textbox(value=config.CONVERSATION_LANGUAGE, label="Conversation language (auto or language name)")
+                music_output_format = gr.Dropdown(
+                    choices=sorted(__import__("dj_reachy.runtime_settings", fromlist=["_ALLOWED_FORMATS"])._ALLOWED_FORMATS),
+                    value=config.MUSIC_OUTPUT_FORMAT, label="Music output format",
+                )
+                motion_style = gr.Dropdown(
+                    choices=["groove", "bounce", "smooth", "classic"], value=config.MOTION_STYLE, label="Motion style",
+                )
+                instructions_text = gr.Textbox(
+                    value=(config.APP_HOME / "instructions.md").read_text(encoding="utf-8")
+                    if (config.APP_HOME / "instructions.md").is_file() else "",
+                    label="User-owned voice instructions", lines=6,
+                )
+                save_settings_btn = gr.Button("Save settings and reload voice")
+                settings_status = gr.Markdown(value="")
+
+        async def _generate_music(prompt: str, plan_json: str, model: str, duration_s: float,
+                                  styles: str, exclusions: str, lyrics: str, language: str,
+                                  instrumental: bool) -> str:
+            if bool(prompt.strip()) == bool(plan_json.strip()):
+                return "Enter exactly one of a prompt or a versioned composition plan."
+            args: dict[str, Any] = {
+                "music_length_ms": int(duration_s * 1000), "model_id": model,
+                "positive_styles": [item.strip() for item in styles.split(",") if item.strip()],
+                "negative_styles": [item.strip() for item in exclusions.split(",") if item.strip()],
+                "lyrics": lyrics, "language": language, "force_instrumental": instrumental,
+            }
+            if plan_json.strip():
+                try:
+                    import json
+                    args["composition_plan"] = json.loads(plan_json)
+                except json.JSONDecodeError:
+                    return "Composition plan must be valid JSON."
+            else:
+                args["prompt"] = prompt.strip()
+            from dj_reachy.tools.core_tools import dispatch_tool_call
+            import json
+            result = await dispatch_tool_call("make_song_and_dance", json.dumps(args), deps)
+            return str(result.get("status") or result.get("error") or "Generation finished.")
+
+        async def _save_settings(backend: str, model: str, voice: str, language: str, music_model_id: str,
+                                 duration_s: float, fmt: str, style: str, intensity_value: float,
+                                 styles: str, exclusions: str, lyrics: str, lyric_language: str,
+                                 instrumental: bool, instructions: str) -> str:
+            updates = {
+                "voice": {"backend": backend, "model": model, "voice": voice, "language": language},
+                "music": {"model_id": music_model_id, "duration_ms": int(duration_s * 1000),
+                          "output_format": fmt,
+                          "positive_styles": [item.strip() for item in styles.split(",") if item.strip()],
+                          "negative_styles": [item.strip() for item in exclusions.split(",") if item.strip()],
+                          "lyrics": lyrics, "language": lyric_language, "force_instrumental": instrumental},
+                "motion": {"style": style, "intensity": max(0.0, min(100.0, intensity_value)) / 400.0},
+            }
+            try:
+                saved = runtime_store.update(updates)
+                apply_runtime_settings(saved)
+                from dj_reachy.profiles.dj_reachy.make_song_and_dance import set_dance_intensity, set_dance_style
+                set_dance_intensity(saved["motion"]["intensity"])
+                set_dance_style(saved["motion"]["style"])
+                instructions_path = config.APP_HOME / "instructions.md"
+                instructions_path.parent.mkdir(parents=True, exist_ok=True)
+                fd, temp_name = tempfile.mkstemp(prefix=".instructions.", suffix=".tmp", dir=instructions_path.parent)
+                try:
+                    with os.fdopen(fd, "w", encoding="utf-8") as stream_file:
+                        stream_file.write(instructions[:12000])
+                        stream_file.flush()
+                        os.fsync(stream_file.fileno())
+                    os.replace(temp_name, instructions_path)
+                finally:
+                    Path(temp_name).unlink(missing_ok=True)
+                await handler._restart_session()
+                return "Settings saved. Voice reconnect requested; subscription access is still unverified."
+            except (ValueError, OSError) as exc:
+                return f"Settings not saved: {exc}"
+
+        generate_music_btn.click(
+            fn=_generate_music,
+            inputs=[music_prompt, composition_plan, music_model, music_duration, positive_styles,
+                    negative_styles, music_lyrics, music_language, force_instrumental],
+            outputs=[dj_ui.status_md],
+        )
+        save_settings_btn.click(
+            fn=_save_settings,
+            inputs=[voice_backend, voice_model, voice_name, conversation_language, music_model,
+                    music_duration, music_output_format, motion_style, dj_ui.dance_intensity,
+                    positive_styles, negative_styles, music_lyrics, music_language, force_instrumental,
+                    instructions_text],
+            outputs=[settings_status],
+        )
         dj_ui.wire_events(handler, stream_manager)
-
-        if not settings_app:
-            app = FastAPI()
-        else:
-            app = settings_app
-
-        app = gr.mount_gradio_app(app, stream.ui, path="/")
+        app = gr.mount_gradio_app(settings_app, stream.ui, path="/")
     else:
         # In headless mode, wire settings_app + instance_path to console LocalStream
         stream_manager = LocalStream(

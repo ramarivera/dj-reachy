@@ -4,7 +4,6 @@ import random
 import asyncio
 import logging
 from typing import Any, Final, Tuple, Literal, Optional
-from pathlib import Path
 from datetime import datetime
 
 import cv2
@@ -60,10 +59,6 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
         self.is_idle_tool_call = False
         self.gradio_mode = gradio_mode
         self.instance_path = instance_path
-        # Track how the API keys were provided (env vs textbox) and their values
-        self._key_source: Literal["env", "textbox"] = "env"
-        self._provided_openai_key: str | None = None
-        self._provided_elevenlabs_key: str | None = None
 
         # Debouncing for partial transcripts
         self.partial_transcript_task: asyncio.Task[None] | None = None
@@ -81,17 +76,140 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
         self._response_done_event: asyncio.Event = asyncio.Event()
         self._waiting_for_response: bool = False
 
+        self._tool_tasks: dict[str, asyncio.Task[None]] = {}
+        self._music_call_active = False
+        self._audio_mute_owner: str | None = None
+        self._subscription_tasks: dict[str, asyncio.Task[None]] = {}
+
+    def schedule_tool_call(self, tool_name: str, args_json: str, call_id: str) -> asyncio.Task[None]:
+        """Run a tool independently from event reception and retain its result correlation."""
+        existing = self._tool_tasks.get(call_id)
+        if existing is not None:
+            return existing
+        task = asyncio.create_task(self._run_tool_call(tool_name, args_json, call_id), name=f"tool-{call_id}")
+        self._tool_tasks[call_id] = task
+        task.add_done_callback(lambda _task: self._tool_tasks.pop(call_id, None))
+        return task
+
+    async def _run_tool_call(self, tool_name: str, args_json: str, call_id: str) -> None:
+        connection = self.connection
+        if tool_name == "make_song_and_dance" and self._music_call_active:
+            result: dict[str, Any] = {"status": "busy", "message": "A song is already generating or playing."}
+        else:
+            if tool_name == "make_song_and_dance":
+                self._music_call_active = True
+            try:
+                result = await dispatch_tool_call(tool_name, args_json, self.deps)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                result = {"error": f"{type(exc).__name__}: {exc}"}
+            finally:
+                if tool_name == "make_song_and_dance":
+                    self._music_call_active = False
+        if connection is None or self.connection is not connection or self._shutdown_requested:
+            return
+        await connection.conversation.item.create(
+            item={"type": "function_call_output", "call_id": call_id, "output": json.dumps(result)}
+        )
+        await self.output_queue.put(
+            AdditionalOutputs(
+                {"role": "assistant", "content": json.dumps(result),
+                 "metadata": {"title": f"🛠️ Used tool {tool_name}", "status": "done"}}
+            )
+        )
+        if not self.is_idle_tool_call:
+            await connection.response.create(
+                response={"instructions": "Use the tool result just returned and answer concisely."}
+            )
+        else:
+            self.is_idle_tool_call = False
+        if self.deps.head_wobbler is not None:
+            self.deps.head_wobbler.reset()
+    def schedule_subscription_delegation(self, event: Any) -> None:
+        """Run one correlated subscription delegation without blocking event reception."""
+        item = getattr(event, "item", {})
+        if isinstance(item, dict):
+            delegation_id = item.get("id") or item.get("delegation_item_id")
+            content = item.get("content", [])
+            event_text = " ".join(str(part.get("text", "")) for part in content if isinstance(part, dict))
+            event_text = event_text or str(item.get("text") or "")
+        else:
+            delegation_id = getattr(item, "id", None)
+            event_text = str(getattr(item, "text", "") or "")
+        if not isinstance(delegation_id, str) or not delegation_id:
+            delegation_id = getattr(event, "delegation_item_id", None)
+        if not isinstance(delegation_id, str) or not delegation_id or delegation_id in self._subscription_tasks:
+            return
+        transcript = str(getattr(event, "transcript_context", "") or "")
+        task = asyncio.create_task(
+            self._run_subscription_delegation(delegation_id, event_text, transcript),
+            name=f"delegation-{delegation_id}",
+        )
+        self._subscription_tasks[delegation_id] = task
+        task.add_done_callback(lambda _task: self._subscription_tasks.pop(delegation_id, None))
+
+    async def _run_subscription_delegation(self, delegation_id: str, event_text: str, transcript: str) -> None:
+        connection = self.connection
+        if connection is None or not hasattr(connection, "send_context"):
+            return
+        from dj_reachy.subscription_voice import plan_delegation
+        action = plan_delegation(event_text, transcript)
+        if action is None:
+            spoken = "I can control music and dance, but I couldn't map that request to an app command."
+        else:
+            tool_name, arguments = action
+            if tool_name == "make_song_and_dance" and self._music_call_active:
+                result: dict[str, Any] = {"status": "busy"}
+            else:
+                if tool_name == "make_song_and_dance":
+                    self._music_call_active = True
+                await connection.send_context("Working on that now.", "commentary", delegation_id)
+                try:
+                    result = await dispatch_tool_call(tool_name, json.dumps(arguments), self.deps)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    result = {"error": type(exc).__name__}
+                finally:
+                    if tool_name == "make_song_and_dance":
+                        self._music_call_active = False
+            status = str(result.get("status") or "")
+            if status in ("completed", "saved"):
+                spoken = "Done. The track finished."
+            elif status == "paused":
+                spoken = "The music is paused."
+            elif status == "resumed":
+                spoken = "The music resumed."
+            elif status == "busy":
+                spoken = "A track is already generating or playing."
+            elif status == "cancelled":
+                spoken = str(result.get("message") or "Local work stopped. The provider job may have continued.")
+            elif status == "stopped":
+                spoken = "Music stopped."
+            elif status in ("not_playing", "not_paused"):
+                spoken = "There isn't active music to control."
+            elif "error" in result:
+                spoken = "That app command failed."
+            else:
+                spoken = f"Done: {status or 'command completed'}."
+        if self.connection is connection and not self._shutdown_requested:
+            await connection.send_context(spoken, "speakable", delegation_id)
+
     def copy(self) -> "OpenaiRealtimeHandler":
         """Create a copy of the handler."""
         return OpenaiRealtimeHandler(self.deps, self.gradio_mode, self.instance_path)
 
-    def mute_output_audio(self) -> None:
-        """Mute assistant audio output (for external audio playback)."""
+    def mute_output_audio(self, owner: str = "external") -> None:
+        """Mute assistant audio for one playback owner."""
+        self._audio_mute_owner = owner
         self._mute_output_audio = True
 
-    def unmute_output_audio(self) -> None:
-        """Unmute assistant audio output."""
-        self._mute_output_audio = False
+    def unmute_output_audio(self, owner: str = "external") -> None:
+        """Release only the matching playback owner's mute."""
+        if self._audio_mute_owner == owner:
+            self._audio_mute_owner = None
+            self._mute_output_audio = False
 
     async def apply_personality(self, profile: str | None) -> str:
         """Apply a new personality (profile) at runtime if possible.
@@ -163,92 +281,51 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
             raise
 
     async def start_up(self) -> None:
-        """Start the handler with minimal retries on unexpected websocket closure."""
         from dj_reachy.config import set_api_keys
-        
         openai_api_key = config.OPENAI_API_KEY
         elevenlabs_api_key = config.ELEVENLABS_API_KEY
-        
+
         if self.gradio_mode:
-            # Get API keys from UI textboxes
             await self.wait_for_args()  # type: ignore[no-untyped-call]
             args = list(self.latest_args)
-            
-            # Debug: log args structure
-            logger.info(f"Gradio args count: {len(args)}")
-            for i, arg in enumerate(args):
-                if isinstance(arg, str) and len(arg) > 20:
-                    # Truncate long strings (like API keys) for privacy
-                    logger.info(f"  args[{i}]: {type(arg).__name__} = '{arg[:10]}...{arg[-4:]}' (len={len(arg)})")
-                else:
-                    logger.info(f"  args[{i}]: {type(arg).__name__} = {repr(arg)[:50]}")
-            
-            # Gradio prepends internal values, so actual additional_inputs start at index 2:
-            # args[0] = '__webrtc_value__' (internal)
-            # args[1] = session ID (internal)
-            # args[2] = chatbot (list)
-            # args[3] = OpenAI key textbox
-            # args[4] = ElevenLabs key textbox
-            # args[5] = dance_intensity (int)
-            textbox_openai_key = args[3] if len(args) > 3 and isinstance(args[3], str) and len(args[3]) > 0 else None
-            textbox_elevenlabs_key = args[4] if len(args) > 4 and isinstance(args[4], str) and len(args[4]) > 0 else None
-            
-            logger.info(f"Extracted textbox_openai_key: {'present' if textbox_openai_key else 'None'}")
-            logger.info(f"Extracted textbox_elevenlabs_key: {'present' if textbox_elevenlabs_key else 'None'}")
-            logger.info(f"Config openai_api_key: {'present' if openai_api_key else 'None'}")
-            
+            textbox_openai_key = args[3] if len(args) > 3 and isinstance(args[3], str) and args[3].strip() else None
+            textbox_elevenlabs_key = args[4] if len(args) > 4 and isinstance(args[4], str) and args[4].strip() else None
             if textbox_openai_key:
                 openai_api_key = textbox_openai_key
-                self._key_source = "textbox"
-                self._provided_openai_key = textbox_openai_key
-            
             if textbox_elevenlabs_key:
-                self._provided_elevenlabs_key = textbox_elevenlabs_key
                 elevenlabs_api_key = textbox_elevenlabs_key
-            
-            logger.info(f"Final openai_api_key: {'present (' + self._key_source + ')' if openai_api_key else 'MISSING'}")
-            
-            # Update config with keys from UI
             set_api_keys(openai_api_key, elevenlabs_api_key)
-        
-        # Wire ElevenLabs key to deps for tools (works in both gradio and headless modes)
-        if elevenlabs_api_key and elevenlabs_api_key.strip():
-            self.deps.elevenlabs_api_key = elevenlabs_api_key
-        
-        if not openai_api_key or not openai_api_key.strip():
-            # In headless console mode, LocalStream now blocks startup until the key is provided.
-            # However, unit tests may invoke this handler directly with a stubbed client.
-            # To keep tests hermetic without requiring a real key, fall back to a placeholder.
-            logger.warning("OPENAI_API_KEY missing. Proceeding with a placeholder (tests/offline).")
-            openai_api_key = "DUMMY"
 
-        self.client = AsyncOpenAI(api_key=openai_api_key)
+        self.deps.elevenlabs_api_key = elevenlabs_api_key.strip() if elevenlabs_api_key else None
+        if config.VOICE_BACKEND == "subscription":
+            from dj_reachy.subscription_voice import SubscriptionRealtimeAdapter
+            self.client = SubscriptionRealtimeAdapter(
+                model=config.VOICE_MODEL,
+                voice=config.VOICE_NAME,
+                instructions=get_session_instructions(),
+            )
+        elif config.VOICE_BACKEND == "api_key":
+            if not openai_api_key or not openai_api_key.strip():
+                raise RuntimeError("API-key Realtime is selected, but OPENAI_API_KEY is missing. Choose subscription Live or provide a key.")
+            self.client = AsyncOpenAI(api_key=openai_api_key.strip())
+        else:
+            raise RuntimeError(f"Unsupported voice backend {config.VOICE_BACKEND!r}; no billing fallback is allowed.")
 
         max_attempts = 3
         for attempt in range(1, max_attempts + 1):
             try:
                 await self._run_realtime_session()
-                # Normal exit from the session, stop retrying
                 return
-            except ConnectionClosedError as e:
-                # Abrupt close (e.g., "no close frame received or sent") → retry
-                logger.warning("Realtime websocket closed unexpectedly (attempt %d/%d): %s", attempt, max_attempts, e)
+            except (ConnectionClosedError, ConnectionError) as e:
+                logger.warning("Realtime connection closed unexpectedly (attempt %d/%d): %s", attempt, max_attempts, type(e).__name__)
                 if attempt < max_attempts:
-                    # exponential backoff with jitter
-                    base_delay = 2 ** (attempt - 1)  # 1s, 2s, 4s, 8s, etc.
-                    jitter = random.uniform(0, 0.5)
-                    delay = base_delay + jitter
-                    logger.info("Retrying in %.1f seconds...", delay)
-                    await asyncio.sleep(delay)
+                    await asyncio.sleep(2 ** (attempt - 1) + random.uniform(0, 0.5))
                     continue
                 raise
             finally:
-                # never keep a stale reference
                 self.connection = None
-                try:
-                    self._connected_event.clear()
-                except Exception:
-                    pass
+                self._connected_event.clear()
+
 
     async def _restart_session(self) -> None:
         """Force-close the current session and start a fresh one in background.
@@ -268,6 +345,17 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
             if getattr(self, "client", None) is None:
                 logger.warning("Cannot restart: OpenAI client not initialized yet.")
                 return
+            if config.VOICE_BACKEND == "subscription":
+                from dj_reachy.subscription_voice import SubscriptionRealtimeAdapter
+                self.client = SubscriptionRealtimeAdapter(
+                    model=config.VOICE_MODEL, voice=config.VOICE_NAME, instructions=get_session_instructions()
+                )
+            elif config.VOICE_BACKEND == "api_key":
+                if not config.OPENAI_API_KEY:
+                    raise RuntimeError("API-key Realtime selected without OPENAI_API_KEY; subscription was not used.")
+                self.client = AsyncOpenAI(api_key=config.OPENAI_API_KEY)
+            else:
+                raise RuntimeError("Unsupported voice backend; no billing fallback is allowed.")
 
             # Fire-and-forget new session and wait briefly for connection
             try:
@@ -285,44 +373,32 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
 
     async def _run_realtime_session(self) -> None:
         """Establish and manage a single realtime session."""
-        async with self.client.realtime.connect(model=config.MODEL_NAME) as conn:
+        model = config.VOICE_MODEL if config.VOICE_BACKEND == "subscription" else config.MODEL_NAME
+        async with self.client.realtime.connect(model=model) as conn:
             try:
-                await conn.session.update(
-                    session={
-                        "type": "realtime",
-                        "instructions": get_session_instructions(),
-                        "audio": {
-                            "input": {
-                                "format": {
-                                    "type": "audio/pcm",
-                                    "rate": self.input_sample_rate,
-                                },
-                                "transcription": {"model": "gpt-4o-transcribe", "language": "en"},
-                                "turn_detection": {
-                                    "type": "server_vad",
-                                    "interrupt_response": True,
-                                },
-                            },
-                            "output": {
-                                "format": {
-                                    "type": "audio/pcm",
-                                    "rate": self.output_sample_rate,
-                                },
-                                "voice": get_session_voice(),
-                            },
+                session_config: dict[str, Any] = {
+                    "type": "realtime",
+                    "instructions": get_session_instructions(),
+                    "audio": {
+                        "input": {
+                            "format": {"type": "audio/pcm", "rate": self.input_sample_rate},
+                            "turn_detection": {"type": "server_vad", "interrupt_response": True},
                         },
-                        "tools": get_tool_specs(),  # type: ignore[typeddict-item]
-                        "tool_choice": "auto",
+                        "output": {
+                            "format": {"type": "audio/pcm", "rate": self.output_sample_rate},
+                            "voice": get_session_voice(),
+                        },
                     },
-                )
-                logger.info(
-                    "Realtime session initialized with profile=%r voice=%r",
-                    getattr(config, "REACHY_MINI_CUSTOM_PROFILE", None),
-                    get_session_voice(),
-                )
-                # If we reached here, the session update succeeded which implies the API key worked.
-                # Persist the key to a newly created .env (copied from .env.example) if needed.
-                self._persist_api_key_if_needed()
+                }
+                if config.VOICE_BACKEND == "api_key":
+                    session_config["audio"]["input"]["transcription"] = {
+                        "model": "gpt-4o-transcribe",
+                        **({"language": config.CONVERSATION_LANGUAGE} if config.CONVERSATION_LANGUAGE != "auto" else {}),
+                    }
+                    session_config["tools"] = get_tool_specs()
+                    session_config["tool_choice"] = "auto"
+                await conn.session.update(session=session_config)
+                logger.info("Realtime session initialized for backend=%s", config.VOICE_BACKEND)
             except Exception:
                 logger.exception("Realtime session.update failed; aborting startup")
                 return
@@ -334,12 +410,28 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
             
             # Trigger automatic startup greeting
             await self._send_startup_greeting()
-            try:
-                self._connected_event.set()
-            except Exception:
-                pass
+            self._connected_event.set()
             async for event in self.connection:
-                logger.debug(f"OpenAI event: {event.type}")
+                logger.debug("Realtime event: %s", event.type)
+                if event.type == "input_transcript.added":
+                    text = str(getattr(event, "text", "") or "")
+                    item = getattr(event, "item", None)
+                    if not text and isinstance(item, dict):
+                        text = str(item.get("text") or "")
+                    if text:
+                        await self.output_queue.put(AdditionalOutputs({"role": "user", "content": text}))
+                if event.type == "output_transcript.added":
+                    text = str(getattr(event, "text", "") or "")
+                    if text:
+                        await self.output_queue.put(AdditionalOutputs({"role": "assistant", "content": text}))
+                if event.type == "turn.done":
+                    turn = getattr(event, "turn", {})
+                    role = turn.get("role") if isinstance(turn, dict) else getattr(turn, "role", None)
+                    transcript = turn.get("transcript") if isinstance(turn, dict) else getattr(turn, "transcript", "")
+                    if role in ("user", "assistant") and transcript:
+                        await self.output_queue.put(AdditionalOutputs({"role": role, "content": transcript}))
+                if event.type == "delegation.created":
+                    self.schedule_subscription_delegation(event)
                 if event.type == "input_audio_buffer.speech_started":
                     if hasattr(self, "_clear_queue") and callable(self._clear_queue):
                         self._clear_queue()
@@ -431,91 +523,10 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
                     tool_name = getattr(event, "name", None)
                     args_json_str = getattr(event, "arguments", None)
                     call_id = getattr(event, "call_id", None)
-
-                    if not isinstance(tool_name, str) or not isinstance(args_json_str, str):
-                        logger.error("Invalid tool call: tool_name=%s, args=%s", tool_name, args_json_str)
+                    if not all(isinstance(value, str) for value in (tool_name, args_json_str, call_id)):
+                        logger.error("Ignoring uncorrelated or malformed tool call event")
                         continue
-
-                    try:
-                        tool_result = await dispatch_tool_call(tool_name, args_json_str, self.deps)
-                        logger.debug("Tool '%s' executed successfully", tool_name)
-                        logger.debug("Tool result: %s", tool_result)
-                    except Exception as e:
-                        logger.error("Tool '%s' failed", tool_name)
-                        tool_result = {"error": str(e)}
-
-                    # send the tool result back
-                    if isinstance(call_id, str):
-                        await self.connection.conversation.item.create(
-                            item={
-                                "type": "function_call_output",
-                                "call_id": call_id,
-                                "output": json.dumps(tool_result),
-                            },
-                        )
-
-                    await self.output_queue.put(
-                        AdditionalOutputs(
-                            {
-                                "role": "assistant",
-                                "content": json.dumps(tool_result),
-                                "metadata": {"title": f"🛠️ Used tool {tool_name}", "status": "done"},
-                            },
-                        ),
-                    )
-
-                    if tool_name == "camera" and "b64_im" in tool_result:
-                        # use raw base64, don't json.dumps (which adds quotes)
-                        b64_im = tool_result["b64_im"]
-                        if not isinstance(b64_im, str):
-                            logger.warning("Unexpected type for b64_im: %s", type(b64_im))
-                            b64_im = str(b64_im)
-                        await self.connection.conversation.item.create(
-                            item={
-                                "type": "message",
-                                "role": "user",
-                                "content": [
-                                    {
-                                        "type": "input_image",
-                                        "image_url": f"data:image/jpeg;base64,{b64_im}",
-                                    },
-                                ],
-                            },
-                        )
-                        logger.info("Added camera image to conversation")
-
-                        if self.deps.camera_worker is not None:
-                            np_img = self.deps.camera_worker.get_latest_frame()
-                            if np_img is not None:
-                                # Camera frames are BGR from OpenCV; convert so Gradio displays correct colors.
-                                rgb_frame = cv2.cvtColor(np_img, cv2.COLOR_BGR2RGB)
-                            else:
-                                rgb_frame = None
-                            img = gr.Image(value=rgb_frame)
-
-                            await self.output_queue.put(
-                                AdditionalOutputs(
-                                    {
-                                        "role": "assistant",
-                                        "content": img,
-                                    },
-                                ),
-                            )
-
-                    # if this tool call was triggered by an idle signal, don't make the robot speak
-                    # for other tool calls, let the robot reply out loud
-                    if self.is_idle_tool_call:
-                        self.is_idle_tool_call = False
-                    else:
-                        await self.connection.response.create(
-                            response={
-                                "instructions": "Use the tool result just returned and answer concisely in speech.",
-                            },
-                        )
-
-                    # re synchronize the head wobble after a tool call that may have taken some time
-                    if self.deps.head_wobbler is not None:
-                        self.deps.head_wobbler.reset()
+                    self.schedule_tool_call(tool_name, args_json_str, call_id)
 
                 # server error
                 if event.type == "error":
@@ -600,6 +611,13 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
                 await self.partial_transcript_task
             except asyncio.CancelledError:
                 pass
+        owned_tasks = [*self._tool_tasks.values(), *self._subscription_tasks.values()]
+        for task in owned_tasks:
+            task.cancel()
+        if owned_tasks:
+            await asyncio.gather(*owned_tasks, return_exceptions=True)
+        self._tool_tasks.clear()
+        self._subscription_tasks.clear()
 
         if self.connection:
             try:
@@ -795,70 +813,3 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
                 "tool_choice": "required",
             },
         )
-
-    def _persist_api_key_if_needed(self) -> None:
-        """Persist the API key into `.env` inside `instance_path/` when appropriate.
-
-        - Only runs in Gradio mode when key came from the textbox and is non-empty.
-        - Only saves if `self.instance_path` is not None.
-        - Writes `.env` to `instance_path/.env` (does not overwrite if it already exists).
-        - If `instance_path/.env.example` exists, copies its contents while overriding OPENAI_API_KEY.
-        """
-        try:
-            if not self.gradio_mode:
-                logger.warning("Not in Gradio mode; skipping API key persistence.")
-                return
-
-            if self._key_source != "textbox":
-                logger.info("API key not provided via textbox; skipping persistence.")
-                return
-
-            key = (self._provided_openai_key or "").strip()
-            if not key:
-                logger.warning("No API key provided via textbox; skipping persistence.")
-                return
-            if self.instance_path is None:
-                logger.warning("Instance path is None; cannot persist API key.")
-                return
-
-            # Update the current process environment for downstream consumers
-            try:
-                import os
-
-                os.environ["OPENAI_API_KEY"] = key
-            except Exception:  # best-effort
-                pass
-
-            target_dir = Path(self.instance_path)
-            env_path = target_dir / ".env"
-            if env_path.exists():
-                # Respect existing user configuration
-                logger.info(".env already exists at %s; not overwriting.", env_path)
-                return
-
-            example_path = target_dir / ".env.example"
-            content_lines: list[str] = []
-            if example_path.exists():
-                try:
-                    content = example_path.read_text(encoding="utf-8")
-                    content_lines = content.splitlines()
-                except Exception as e:
-                    logger.warning("Failed to read .env.example at %s: %s", example_path, e)
-
-            # Replace or append the OPENAI_API_KEY line
-            replaced = False
-            for i, line in enumerate(content_lines):
-                if line.strip().startswith("OPENAI_API_KEY="):
-                    content_lines[i] = f"OPENAI_API_KEY={key}"
-                    replaced = True
-                    break
-            if not replaced:
-                content_lines.append(f"OPENAI_API_KEY={key}")
-
-            # Ensure file ends with newline
-            final_text = "\n".join(content_lines) + "\n"
-            env_path.write_text(final_text, encoding="utf-8")
-            logger.info("Created %s and stored OPENAI_API_KEY for future runs.", env_path)
-        except Exception as e:
-            # Never crash the app for QoL persistence; just log.
-            logger.warning("Could not persist OPENAI_API_KEY to .env: %s", e)
