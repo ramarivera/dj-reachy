@@ -53,6 +53,14 @@ Native capture and playback each have one owned worker and bounded handoff, rath
 
 A permanently stalled native operation cannot safely return through the app's unconditional media-close cleanup. If native teardown fails to quiesce within two seconds, the standalone app logs a critical error and terminates its own process with status 70 instead of claiming clean shutdown or closing resources under a live native call. Run this native path in its app process, not embedded in another long-lived Python host. A supervisor may restart it only under the user's session policy; termination is not proof of a neutral-pose reset or provider cancellation.
 
+## Sustained speech-motion qualification
+
+Do not qualify progressive stutter with a short no-motion audio probe. Exercise the real `HeadWobbler`, `MovementManager`, inbound Opus decoder worker, adapter audio reader, handler queue, outbound Opus encoder and native media calls together. Use synthetic source/sink endpoints and intercepted robot targets when physical testing is not authorized. Supply inbound frames on an anchored 50 Hz clock, not a sleep-after-processing loop that silently reduces the workload as the app slows. Compare early and late cadence and queue depth over at least 60 seconds.
+
+The speech-motion analysis only consumes its latest 320-sample frame. Keeping ten seconds of samples made `islice` traverse up to 160,000 values every hop. The deterministic regression counts values traversed, avoiding a CPU-dependent timing assertion, and compares motion output against the legacy window across sample rates and chunk boundaries.
+
+On the same robot, a 60-second device-free duplex test with the old window produced 2,434 outbound packets and 2,640 playback pushes while its playback queue grew to 273 frames at the last sample. Changing only the analysis-window bound produced 3,000 outbound packets and 3,000 playback pushes with zero playback backlog at every sample. This reproduces a progressive processing failure and verifies its offline repair. It does not establish physical audibility, the full severity of a provider-connected failure, or successful spoken music control. Keep those acceptance gates separate.
+
 ## Qualification limits
 
 Offline tests exercise synthetic stereo frames through the real native capture loop, handler selection/resampling/encoding, subscription append and microphone track. Loopback WebRTC tests check actual RTP statistics and cleanup. Privacy, rotation, rate limiting and owned-resource closure are tested separately.

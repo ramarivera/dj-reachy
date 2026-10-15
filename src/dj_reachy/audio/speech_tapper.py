@@ -119,7 +119,9 @@ class SwayRollRT:
     def __init__(self, rng_seed: int = 7):
         """Initialize state."""
         self._seed = int(rng_seed)
-        self.samples: deque[float] = deque(maxlen=10 * SR)  # sliding window for VAD/env
+        # Only the latest analysis frame is consumed. A longer deque makes islice
+        # traverse elapsed audio on every hop and starves other real-time work.
+        self.samples: deque[float] = deque(maxlen=FRAME)
         self.carry: NDArray[np.float32] = np.zeros(0, dtype=np.float32)
 
         self.vad_on = False
