@@ -14,7 +14,7 @@ concurrency:
 jobs:
   tests:
     name: pytest (py${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -34,6 +34,13 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - uses: astral-sh/setup-uv@v5
+
+      - name: Install real audio decoder prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ffmpeg mpg123
+          ffmpeg -version
+          mpg123 --version
 
       - name: Set HF_HOME
         shell: bash

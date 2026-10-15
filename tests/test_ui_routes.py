@@ -3,17 +3,23 @@ from __future__ import annotations
 import json
 import asyncio
 import threading
-from types import SimpleNamespace
+from pathlib import Path
 from unittest.mock import Mock
+from collections.abc import Iterator
 
 import numpy as np
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from dj_reachy.openai_realtime import OpenaiRealtimeHandler
+
+
+Dashboard = tuple[TestClient, OpenaiRealtimeHandler, Path]
+
 
 @pytest.fixture
-def dashboard(tmp_path, monkeypatch):
+def dashboard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Dashboard]:
     """Run HTTP and real music controls on separate loops without hardware."""
     from dj_reachy.config import config
     from dj_reachy.console import LocalStream
@@ -28,13 +34,13 @@ def dashboard(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "fixture-present")
     robot = Mock()
     deps = ToolDependencies(reachy_mini=robot, movement_manager=Mock())
-    handler = SimpleNamespace(deps=deps, output_queue=asyncio.Queue())
+    handler = OpenaiRealtimeHandler(deps)
     deps.openai_realtime_handler = handler
     app = FastAPI()
     stream = LocalStream(handler, robot, settings_app=app, instance_path="/must-not-write")
     loop = asyncio.new_event_loop()
     started = threading.Event()
-    def run_loop():
+    def run_loop() -> None:
         asyncio.set_event_loop(loop)
         loop.call_soon(started.set)
         loop.run_forever()
@@ -51,7 +57,7 @@ def dashboard(tmp_path, monkeypatch):
         loop.close()
 
 
-def test_controls_stop_actual_tool_queue_without_voice_or_provider(dashboard) -> None:
+def test_controls_stop_actual_tool_queue_without_voice_or_provider(dashboard: Dashboard) -> None:
     """Stop clears actual PCM queued by the active handler."""
     client, handler, _ = dashboard
     handler.output_queue.put_nowait((24000, np.zeros(240, dtype=np.int16)))
@@ -62,7 +68,7 @@ def test_controls_stop_actual_tool_queue_without_voice_or_provider(dashboard) ->
     assert client.post("/api/dj-reachy/music/unknown", json={}).status_code == 404
 
 
-def test_saved_files_reject_symlinks_traversal_and_preserve_external_files(dashboard) -> None:
+def test_saved_files_reject_symlinks_traversal_and_preserve_external_files(dashboard: Dashboard) -> None:
     """Symlink and traversal requests never read or delete external files."""
     client, _, home = dashboard
     songs = home / "songs"
@@ -82,7 +88,7 @@ def test_saved_files_reject_symlinks_traversal_and_preserve_external_files(dashb
     assert not (songs / "safe.json").exists()
 
 
-def test_credentials_are_private_and_never_returned_in_settings(dashboard) -> None:
+def test_credentials_are_private_and_never_returned_in_settings(dashboard: Dashboard) -> None:
     """Credential persistence uses 0600 and never returns its value."""
     client, _, home = dashboard
     response = client.post("/api/dj-reachy/credentials", json={"provider": "elevenlabs", "key": "fixture-secret"})
@@ -95,9 +101,10 @@ def test_credentials_are_private_and_never_returned_in_settings(dashboard) -> No
     assert client.post("/api/dj-reachy/credentials", json={"provider": "openai", "key": "bad\nINJECTED=1"}).status_code == 400
 
 
-def test_generation_rejects_malformed_plans_before_any_provider_work(dashboard) -> None:
+def test_generation_rejects_malformed_plans_before_any_provider_work(dashboard: Dashboard) -> None:
     """Malformed nested plans never reach the music executor."""
     client, _, _ = dashboard
+    body: object
     for body in ({"prompt": "test", "music_length_ms": True},
                  {"prompt": "test", "composition_plan": {"chunks": []}},
                  {"composition_plan": []},

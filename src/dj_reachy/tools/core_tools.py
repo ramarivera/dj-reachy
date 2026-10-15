@@ -33,11 +33,11 @@ _TOOLS_INITIALIZED = False
 
 
 
-def get_concrete_subclasses(base: type[Tool]) -> List[type[Tool]]:
+def get_concrete_subclasses(base: type) -> List[type[Tool]]:
     """Recursively find all concrete (non-abstract) subclasses of a base class."""
     result: List[type[Tool]] = []
     for cls in base.__subclasses__():
-        if not inspect.isabstract(cls):
+        if issubclass(cls, Tool) and not inspect.isabstract(cls):
             result.append(cls)
         # recurse into subclasses
         result.extend(get_concrete_subclasses(cls))
@@ -174,21 +174,25 @@ def _load_profile_tools() -> None:
 
 
 def _initialize_tools() -> None:
-    """Populate registry once, even if module is imported repeatedly."""
-    global ALL_TOOLS, ALL_TOOL_SPECS, _TOOLS_INITIALIZED
+    """Load modules once and discover classes completed after a circular import."""
+    global _TOOLS_INITIALIZED
 
-    if _TOOLS_INITIALIZED:
-        logger.debug("Tools already initialized; skipping reinitialization.")
-        return
+    if not _TOOLS_INITIALIZED:
+        _load_profile_tools()
 
-    _load_profile_tools()
-
-    ALL_TOOLS = {cls.name: cls() for cls in get_concrete_subclasses(Tool)}  # type: ignore[type-abstract]
-    ALL_TOOL_SPECS = [tool.spec() for tool in ALL_TOOLS.values()]
-
-    for tool_name, tool in ALL_TOOLS.items():
+    # A profile module may import Tool while core_tools is still initializing.
+    # Refresh missing classes at the public interface, preserving existing tool
+    # instances and references to the exported registry objects.
+    discovered = {
+        cls.name: cls()
+        for cls in get_concrete_subclasses(Tool)
+        if cls.name not in ALL_TOOLS
+    }
+    ALL_TOOLS.update(discovered)
+    if discovered:
+        ALL_TOOL_SPECS[:] = [tool.spec() for tool in ALL_TOOLS.values()]
+    for tool_name, tool in discovered.items():
         logger.info(f"tool registered: {tool_name} - {tool.description}")
-
     _TOOLS_INITIALIZED = True
 
 
@@ -197,6 +201,7 @@ _initialize_tools()
 
 def get_tool_specs(exclusion_list: list[str] = []) -> list[Dict[str, Any]]:
     """Get tool specs, optionally excluding some tools."""
+    _initialize_tools()
     return [spec for spec in ALL_TOOL_SPECS if spec.get("name") not in exclusion_list]
 
 
@@ -212,6 +217,7 @@ def _safe_load_obj(args_json: str) -> Dict[str, Any]:
 
 async def dispatch_tool_call(tool_name: str, args_json: str, deps: ToolDependencies) -> Dict[str, Any]:
     """Dispatch a tool call by name with JSON args and dependencies."""
+    _initialize_tools()
     tool = ALL_TOOLS.get(tool_name)
 
     if not tool:

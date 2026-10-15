@@ -1,0 +1,41 @@
+Conduit voice adaptations in DJ Reachy
+
+subscription_voice.py adapts the consumer context dialect and readiness lifecycle
+from GPTLiveProtocol.swift and GPTLiveSession.swift in kaishi00/hermes-conduit,
+revision 8abe874ecba738396fc7782288ba6ce1d18c6555.
+https://github.com/kaishi00/hermes-conduit/tree/8abe874ecba738396fc7782288ba6ce1d18c6555/Conduit/Voice/GPTLive
+
+voice_media.py and subscription_voice.py adapt PCM pacing, resampling, pending
+data-channel delivery and cleanup from dashboard/watch_audio_helper.py.
+subscription_broker.py adapts the consumer signaling/session shape from
+dashboard/plugin_api.py in hermes-conduit-notifier,
+revision 9cf64e1bbccbc57914c5ced8b8b1756df0a6e1a1.
+https://github.com/kaishi00/hermes-conduit-notifier/tree/9cf64e1bbccbc57914c5ced8b8b1756df0a6e1a1/dashboard
+
+No Hermes execution code or credential store is required by this fork. The new
+broker uses its own explicitly injected Codex credential resolver and fixed app
+registry. These notices cover adapted Conduit code only. DJ Reachy's upstream
+Apache License 2.0 and history remain unchanged.
+
+MIT License
+
+Copyright (c) 2026 kaishi00
+Copyright (c) 2026 Hermes Conduit contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

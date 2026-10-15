@@ -2,6 +2,7 @@
 
 import gradio as gr
 
+
 # DJ Reachy color palette (matching static/style.css)
 DJ_REACHY_COLORS = {
     "bg": "#060b1a",
@@ -75,7 +76,7 @@ DJ_REACHY_CSS = """
     content: '';
     position: fixed;
     inset: 0;
-    background: 
+    background:
         radial-gradient(circle at 20% 20%, rgba(69, 196, 255, 0.12), transparent 35%),
         radial-gradient(circle at 80% 0%, rgba(94, 240, 193, 0.12), transparent 32%),
         radial-gradient(circle at 30% 60%, rgba(255, 255, 255, 0.03), transparent 35%);

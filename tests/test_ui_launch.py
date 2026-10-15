@@ -1,9 +1,13 @@
 """Headless app construction with real SDK status and intercepted hardware."""
 from __future__ import annotations
+import time
 import asyncio
 import threading
 from types import SimpleNamespace
+from pathlib import Path
+from argparse import Namespace
 from unittest.mock import Mock
+from collections.abc import Iterator
 
 import pytest
 from fastapi import FastAPI
@@ -13,7 +17,7 @@ from reachy_mini.daemon.daemon import DaemonState, DaemonStatus
 
 
 @pytest.fixture(autouse=True)
-def construction_loop():
+def construction_loop() -> Iterator[None]:
     """Supply the real handler's synchronous construction loop without connecting it."""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -23,7 +27,7 @@ def construction_loop():
         loop.close()
         asyncio.set_event_loop(None)
 
-def test_managed_launch_uses_user_home_not_sdk_instance(tmp_path, monkeypatch) -> None:
+def test_managed_launch_uses_user_home_not_sdk_instance(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """SDK module paths never own runtime settings, songs or persona."""
     from dj_reachy import main, moves, console
     from dj_reachy.audio import head_wobbler
@@ -42,11 +46,11 @@ def test_managed_launch_uses_user_home_not_sdk_instance(tmp_path, monkeypatch) -
     monkeypatch.setattr(main, "handle_vision_stuff", lambda *args: (None, None, None))
     monkeypatch.setattr(moves, "MovementManager", Mock())
     monkeypatch.setattr(head_wobbler, "HeadWobbler", Mock())
-    monkeypatch.setattr(main.time, "sleep", lambda _: None)
+    monkeypatch.setattr(time, "sleep", lambda _: None)
     launched = []
     monkeypatch.setattr(console.LocalStream, "launch", lambda self: launched.append(self))
     app = FastAPI()
-    args = SimpleNamespace(debug=False, no_camera=True, head_tracker=None, gradio=False)
+    args = Namespace(debug=False, no_camera=True, head_tracker=None, gradio=False)
     main.run(args, robot=robot, settings_app=app, instance_path=str(package_home))
     assert config.APP_HOME == user_home
     assert config.SONGS_DIR == user_home / "songs"
@@ -63,7 +67,7 @@ def test_managed_launch_uses_user_home_not_sdk_instance(tmp_path, monkeypatch) -
     robot.media.start_playing.assert_not_called()
 
 
-def test_cli_parser_and_sdk_app_delegate(monkeypatch) -> None:
+def test_cli_parser_and_sdk_app_delegate(monkeypatch: pytest.MonkeyPatch) -> None:
     """The SDK entry point retains the real CLI media flags."""
     from dj_reachy import main
     monkeypatch.setattr("sys.argv", ["dj-reachy", "--no-camera", "--gradio"])
@@ -77,7 +81,9 @@ def test_cli_parser_and_sdk_app_delegate(monkeypatch) -> None:
     assert call.call_args.kwargs["settings_app"] is app.settings_app
 
 
-def test_gradio_mounts_shared_settings_and_does_not_serialize_keys(tmp_path, monkeypatch) -> None:
+def test_gradio_mounts_shared_settings_and_does_not_serialize_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The constructed browser app exposes settings even with credentials."""
     from dj_reachy import main
     from dj_reachy.config import config
@@ -100,7 +106,7 @@ def test_gradio_mounts_shared_settings_and_does_not_serialize_keys(tmp_path, mon
         assert client.post("/api/dj-reachy/music/stop", json={}).status_code == 409
 
 
-def test_cli_explicit_backend_and_no_hardware_settings_mode(monkeypatch) -> None:
+def test_cli_explicit_backend_and_no_hardware_settings_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     """Select API billing explicitly without constructing a robot."""
     from dj_reachy.main import parse_args
     monkeypatch.setattr("sys.argv", ["dj-reachy", "--settings-only", "--voice-backend", "api_key"])
@@ -111,7 +117,9 @@ def test_cli_explicit_backend_and_no_hardware_settings_mode(monkeypatch) -> None
 
 
 @pytest.mark.asyncio
-async def test_gradio_controls_target_live_component_handler(tmp_path, monkeypatch) -> None:
+async def test_gradio_controls_target_live_component_handler(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The active FastRTC copy, not the disconnected template, owns playback."""
     import httpx
     import numpy as np

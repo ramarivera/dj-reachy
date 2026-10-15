@@ -1,12 +1,13 @@
 from __future__ import annotations
 import json
+from pathlib import Path
 
 import pytest
 
 from dj_reachy.runtime_settings import RuntimeSettingsStore
 
 
-def test_runtime_settings_persist_separate_validated_groups_atomically(tmp_path) -> None:
+def test_runtime_settings_persist_separate_validated_groups_atomically(tmp_path: Path) -> None:
     """Persist separate groups without losing normalized settings."""
     store = RuntimeSettingsStore(tmp_path / "settings.json")
     settings = store.update({
@@ -20,7 +21,7 @@ def test_runtime_settings_persist_separate_validated_groups_atomically(tmp_path)
     assert json.loads((tmp_path / "settings.json").read_text()) == settings
 
 
-def test_invalid_or_secret_settings_do_not_replace_saved_values(tmp_path) -> None:
+def test_invalid_or_secret_settings_do_not_replace_saved_values(tmp_path: Path) -> None:
     """Reject credential fields without replacing the existing JSON."""
     path = tmp_path / "settings.json"
     store = RuntimeSettingsStore(path)
@@ -33,7 +34,7 @@ def test_invalid_or_secret_settings_do_not_replace_saved_values(tmp_path) -> Non
     assert "never-persist" not in content_before
 
 
-def test_http_updates_validate_shapes_and_preserve_state(tmp_path) -> None:
+def test_http_updates_validate_shapes_and_preserve_state(tmp_path: Path) -> None:
     """Route validation rejects malformed values without partial writes."""
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
@@ -48,6 +49,7 @@ def test_http_updates_validate_shapes_and_preserve_state(tmp_path) -> None:
         assert response.status_code == 200, response.text
         assert response.json()["music"]["duration_ms"] == 10000
         before = path.read_bytes()
+        invalid: object
         for invalid in ([], {"music": []}, {"music": {"model_id": []}},
                         {"voice": {"backend": {"nested": True}}}, {"motion": {"intensity": True}},
                         {"voice": {"token": "fixture-secret"}}, {"extra": {}}):
@@ -58,7 +60,7 @@ def test_http_updates_validate_shapes_and_preserve_state(tmp_path) -> None:
         assert client.put("/api/dj-reachy/settings", content="{").status_code == 400
 
 
-def test_backend_switch_resets_incompatible_defaults_and_rejects_cross_billing(tmp_path) -> None:
+def test_backend_switch_resets_incompatible_defaults_and_rejects_cross_billing(tmp_path: Path) -> None:
     """Backend selection cannot retain a subscription model under API billing."""
     store = RuntimeSettingsStore(tmp_path / "settings.json")
     switched = store.update({"voice": {"backend": "api_key"}})
@@ -73,7 +75,9 @@ def test_backend_switch_resets_incompatible_defaults_and_rejects_cross_billing(t
     assert reverted["voice"]["voice"] == "cove"
 
 
-def test_persona_reload_keeps_paid_confirmation_and_separates_languages(tmp_path, monkeypatch) -> None:
+def test_persona_reload_keeps_paid_confirmation_and_separates_languages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Reload persona additions without dropping the paid-generation policy."""
     from dj_reachy.config import config
     from dj_reachy.prompts import get_session_voice, get_session_instructions
