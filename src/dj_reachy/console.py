@@ -14,7 +14,6 @@ import numpy as np
 from fastapi import FastAPI
 from fastrtc import AdditionalOutputs, audio_to_float32
 from numpy.typing import NDArray
-from scipy.signal import resample
 from fastapi.responses import FileResponse
 from starlette.staticfiles import StaticFiles
 
@@ -22,6 +21,7 @@ from reachy_mini import ReachyMini
 from dj_reachy.config import config
 from dj_reachy.openai_realtime import OpenaiRealtimeHandler
 from dj_reachy.runtime_settings import register_runtime_settings_routes
+from dj_reachy.audio.streaming_pcm import StreamingPCMConverter
 from dj_reachy.audio.native_playback import configure_native_playback
 
 
@@ -122,6 +122,9 @@ class LocalStream:
         self._launched = False
         self._media_started = False
         self._play_epoch = 0
+        self._playback_clock = 0.0
+        self._pcm_converter: StreamingPCMConverter | None = None
+        self._pcm_rates: tuple[int, int] | None = None
         self._output_changed = asyncio.Event()
         self._flushed_epoch = 0
         self._flush_task: asyncio.Task[None] | None = None
@@ -242,7 +245,8 @@ class LocalStream:
             done, _ = await asyncio.wait(watched, return_when=asyncio.FIRST_COMPLETED)
             if invalidated in done or epoch != self._play_epoch or self._stop_event.is_set():
                 return False
-            tail_done, _ = await asyncio.wait({invalidated}, timeout=self._output_tail_delay)
+            scheduled = max(0.0, self._playback_clock - loop.time())
+            tail_done, _ = await asyncio.wait({invalidated}, timeout=self._output_tail_delay + scheduled)
             return not tail_done and epoch == self._play_epoch and not self._stop_event.is_set() and not self._closing
         finally:
             if not completed.done():
@@ -275,6 +279,9 @@ class LocalStream:
             if not callable(clear):
                 raise RuntimeError("The selected audio backend cannot flush its playback buffer")
         self.handler.output_queue = asyncio.Queue()
+        self._playback_clock = 0.0
+        self._pcm_converter = None
+        self._pcm_rates = None
         if caller_loop is None:
             # Pre-launch callers have no native owner or in-flight work.
             if callable(clear):
@@ -363,6 +370,53 @@ class LocalStream:
                 self.handler.diagnostics.drop("capture_empty")
             await asyncio.sleep(0.005)
 
+    async def _finish_native_conversion(self, epoch: int) -> None:
+        """Submit the ordered filter tail; interruptions discard it instead."""
+        converter, rates = self._pcm_converter, self._pcm_rates
+        self._pcm_converter = None
+        self._pcm_rates = None
+        if converter is not None and rates is not None:
+            for frame in converter.finish():
+                await self._submit_native_audio(frame, rates[1], epoch)
+
+    async def _submit_native_audio(self, frame: NDArray[np.float32], sample_rate: int, epoch: int) -> None:
+        """Pace contiguous samples with bounded lookahead, interruptible on flush.
+
+        The SDK owns the physical clock. This producer clock limits write-ahead
+        and keeps incoming packet boundaries from restarting the schedule.
+        """
+        loop = asyncio.get_running_loop()
+        changed = self._output_changed
+        mono = frame.reshape(-1)
+        chunk_samples = max(1, sample_rate // 50)
+        for offset in range(0, mono.size, chunk_samples):
+            if epoch != self._play_epoch or self._stop_event.is_set():
+                return
+            now = loop.time()
+            if now > self._playback_clock + 0.2:
+                self._playback_clock = now
+            delay = max(0.0, self._playback_clock - 0.1 - now)
+            if delay:
+                try:
+                    await asyncio.wait_for(changed.wait(), delay)
+                    return
+                except asyncio.TimeoutError:
+                    pass
+            if self._flush_task is not None:
+                await asyncio.shield(self._flush_task)
+            chunk = mono[offset : offset + chunk_samples]
+
+            def push() -> None:
+                # A running native write finishes before the serialized flush;
+                # a stale queued write must not touch replacement PCM.
+                if epoch == self._play_epoch and not self._stop_event.is_set():
+                    self._robot.media.push_audio_sample(chunk)
+
+            await self._playback_io.call(push)
+            if epoch != self._play_epoch or self._stop_event.is_set():
+                return
+            self._playback_clock += chunk.size / sample_rate
+
     async def play_loop(self) -> None:
         """Deliver ordered PCM through the single playback owner."""
         try:
@@ -381,7 +435,9 @@ class LocalStream:
                     self._emit_task = None
                 if isinstance(output, _PlaybackFence):
                     if epoch == self._play_epoch == output.epoch and not output.completed.done():
-                        output.completed.set_result(True)
+                        await self._finish_native_conversion(epoch)
+                        if epoch == self._play_epoch and not output.completed.done():
+                            output.completed.set_result(True)
                     continue
                 if epoch != self._play_epoch or isinstance(output, AdditionalOutputs):
                     continue
@@ -393,19 +449,18 @@ class LocalStream:
                             audio_data = audio_data.T
                         if audio_data.shape[1] > 1:
                             audio_data = audio_data[:, 0]
-                    frame = audio_to_float32(audio_data)
-                    if sample_rate != output_rate:
-                        frame = resample(frame, int(len(frame) * output_rate / sample_rate))
-                    if self._flush_task is not None:
-                        await asyncio.shield(self._flush_task)
-
-                    def push() -> None:
-                        # The epoch can change while this call is waiting for its
-                        # native owner. A running push always precedes the flush.
-                        if epoch == self._play_epoch and not self._stop_event.is_set():
-                            self._robot.media.push_audio_sample(frame)
-
-                    await self._playback_io.call(push)
+                    frame = audio_to_float32(audio_data).reshape(-1)
+                    rates = (sample_rate, output_rate)
+                    if rates != self._pcm_rates:
+                        await self._finish_native_conversion(epoch)
+                        if epoch != self._play_epoch:
+                            continue
+                        self._pcm_converter = StreamingPCMConverter(*rates)
+                        self._pcm_rates = rates
+                    converter = self._pcm_converter
+                    if converter is not None:
+                        for converted in converter.push(frame):
+                            await self._submit_native_audio(converted, output_rate, epoch)
                 await asyncio.sleep(0)
         finally:
             if self._emit_task is not None:

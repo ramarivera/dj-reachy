@@ -402,15 +402,28 @@ async def test_order_format_and_single_playback_owner_are_preserved() -> None:
         stream.handler.output_queue.put_nowait((12000, pcm))
     task = asyncio.create_task(stream.play_loop())
     try:
-        for _ in range(1000):
-            if len(media.pushed) == 32:
-                break
-            await asyncio.sleep(0.001)
-        assert len(media.pushed) == 32
-        for value, output_pcm in enumerate(media.pushed, start=1):
-            assert output_pcm.shape == (16,)
+        # A streaming filter retains history and has a delayed tail; native
+        # packet counts are not source packet counts. Assert every sample and
+        # its order against independently converted whole PCM, including EOF.
+        from av.audio.frame import AudioFrame
+        from av.audio.resampler import AudioResampler
+
+        assert await asyncio.wait_for(stream.drain_audio(), 1) is True
+        source = np.repeat(np.arange(1, 33, dtype=np.float32), 8) / 32768
+        reference_frame = AudioFrame.from_ndarray(source.reshape(1, -1), format="fltp", layout="mono")
+        reference_frame.sample_rate = 12000
+        reference = AudioResampler(format="fltp", layout="mono", rate=24000)
+        expected = np.concatenate([
+            item.to_ndarray().reshape(-1)
+            for item in reference.resample(reference_frame) + reference.resample(None)
+        ])
+        actual = np.concatenate(media.pushed)
+        assert actual.size == expected.size == 512
+        for output_pcm in media.pushed:
+            assert output_pcm.ndim == 1 and output_pcm.size <= 480
             assert output_pcm.dtype == np.float32
-            np.testing.assert_allclose(output_pcm, value / 32768)
+        assert float(actual.max()) < 50 / 32768, "Wrong stereo channel was selected"
+        np.testing.assert_allclose(actual, expected, atol=1e-7, rtol=0)
         assert len(media.push_threads) == 1
         assert threading.get_ident() not in media.push_threads
     finally:
