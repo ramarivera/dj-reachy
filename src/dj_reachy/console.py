@@ -30,6 +30,16 @@ logger = logging.getLogger(__name__)
 _AudioResult = TypeVar("_AudioResult")
 
 
+def _mono_audio(data: NDArray[np.int16]) -> NDArray[np.float32]:
+    """Normalize queued PCM consistently before playback or coalescing."""
+    if data.ndim == 2:
+        if data.shape[1] > data.shape[0]:
+            data = data.T
+        if data.shape[1] > 1:
+            data = data[:, 0]
+    return audio_to_float32(data).reshape(-1)
+
+
 class _PlaybackFence(AdditionalOutputs):
     """An internal FIFO marker, never a user-visible chat event."""
 
@@ -486,12 +496,7 @@ class LocalStream:
                 if isinstance(output, tuple):
                     sample_rate, audio_data = output
                     output_rate = self._robot.media.get_output_audio_samplerate()
-                    if audio_data.ndim == 2:
-                        if audio_data.shape[1] > audio_data.shape[0]:
-                            audio_data = audio_data.T
-                        if audio_data.shape[1] > 1:
-                            audio_data = audio_data[:, 0]
-                    frame: NDArray[np.float32] = audio_to_float32(audio_data).reshape(-1)
+                    frame = _mono_audio(audio_data)
                     # Never wait for more audio. Stop at the first incompatible
                     # format, fence or control, retaining that exact FIFO item.
                     frames = [frame]
@@ -501,16 +506,15 @@ class LocalStream:
                             following = self.handler.output_queue.get_nowait()
                         except asyncio.QueueEmpty:
                             break
-                        if (
-                            not isinstance(following, tuple)
-                            or following[0] != sample_rate
-                            or following[1].ndim != 1
-                            or samples + following[1].size > max(1, sample_rate // 10)
-                        ):
+                        if not isinstance(following, tuple) or following[0] != sample_rate or following[1].ndim not in (1, 2):
                             pending, pending_epoch = following, epoch
                             break
-                        frames.append(audio_to_float32(following[1]).reshape(-1))
-                        samples += following[1].size
+                        following_frame = _mono_audio(following[1])
+                        if samples + following_frame.size > max(1, sample_rate // 10):
+                            pending, pending_epoch = following, epoch
+                            break
+                        frames.append(following_frame)
+                        samples += following_frame.size
                     if len(frames) > 1:
                         frame = np.concatenate(frames)
                     rates = (sample_rate, output_rate)

@@ -1,8 +1,10 @@
 """Exercise sample-clock scheduling through the actual native playback loop."""
 
 import time
+import base64
 import asyncio
 import threading
+from types import SimpleNamespace
 from typing import TypeVar
 from collections.abc import Callable
 
@@ -10,6 +12,7 @@ import numpy as np
 import pytest
 from fastrtc import AdditionalOutputs
 from numpy.typing import NDArray
+from test_openai_realtime import _build_handler
 from test_native_audio_responsiveness import BlockingMedia, make_stream
 
 from dj_reachy.console import _PlaybackFence
@@ -63,7 +66,8 @@ async def test_ready_pcm_coalescing_stops_at_control_or_fence(fence: bool) -> No
 
 
 @pytest.mark.asyncio
-async def test_ready_speech_recovers_with_bounded_owner_completion_delays(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("source", ["flat", "realtime_handler"])
+async def test_ready_speech_recovers_with_bounded_owner_completion_delays(monkeypatch: pytest.MonkeyPatch, source: str) -> None:
     """30ms resume latency must not accumulate once per ready 10ms packet.
 
     Delay the async completion, not the native operation: the owner remains
@@ -74,8 +78,13 @@ async def test_ready_speech_recovers_with_bounded_owner_completion_delays(monkey
     stream = make_stream(media)
     stream.handler.output_queue = asyncio.Queue()
     pcm = np.arange(24000, dtype=np.int16)
+    if source == "realtime_handler":
+        stream.handler = _build_handler(asyncio.get_running_loop())
     for packet in np.split(pcm, 100):
-        stream.handler.output_queue.put_nowait((24000, packet))
+        if source == "realtime_handler":
+            await stream.handler._handle_event(SimpleNamespace(type="response.audio.delta", delta=base64.b64encode(packet.tobytes()).decode()))
+        else:
+            stream.handler.output_queue.put_nowait((24000, packet))
     original_call = stream._playback_io.call
     completions = 0
 
