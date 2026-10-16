@@ -158,15 +158,15 @@ def subscription_delegation(item: object) -> tuple[str, str] | None:
         return None
     texts: list[str] = []
     for part in content:
-        if (
-            not isinstance(part, dict)
-            or set(part) != {"type", "text"}
-            or part.get("type") != "input_text"
-            or not isinstance(part.get("text"), str)
-        ):
+        if not isinstance(part, dict) or part.get("type") != "input_text":
+            continue
+        if not isinstance(part.get("text"), str):
             return None
         texts.append(part["text"])
-    text = "\n".join(texts)
+    # Unrelated-only content must not become a legacy transcript-backed notice.
+    if content and not texts:
+        return None
+    text = "".join(texts)
     try:
         if len(text) > 6000 or len(text.encode("utf-8")) > 12000:
             return None

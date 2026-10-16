@@ -181,7 +181,7 @@ async def test_queued_delegation_cannot_run_on_replacement_connection(
         {"content": "stop music"},
         {"content": [{"type": "output_text", "text": "stop music"}]},
         {"content": [{"type": "input_text", "text": 7}]},
-        {"content": [{"type": "input_text", "text": "stop music", "extra": True}]},
+        {"content": [{"type": "input_text", "text": {"opaque": "stop music"}, "extra": True}]},
         {"content": [{"type": "input_text", "text": "x" * 6001}]},
         {"content": [{"type": "input_text", "text": "🌶" * 3001}]},
         {"content": [{"type": "input_text", "text": " " * 6001}]},
@@ -326,3 +326,34 @@ async def test_inactive_handler_cannot_execute_content_controls(
     finally:
         live.app.connection = live.connection
         live.app._shutdown_requested = False
+
+@pytest.mark.asyncio
+async def test_additive_metadata_preserves_current_words_over_model_control(
+    live: DelegationHarness, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Compatible metadata must not promote model/commentary words into user controls."""
+    import dj_reachy.openai_realtime as realtime
+
+    commands: list[str] = []
+
+    async def dispatch(name: str, arguments: str, deps: ToolDependencies) -> dict[str, str]:
+        commands.append(name)
+        return {"status": "completed"}
+
+    monkeypatch.setattr(realtime, "dispatch_tool_call", dispatch)
+    await live.event({"type": "input_transcript.added", "item": {"text": "check my saved songs"}})
+    wire = {"type": "delegation.created", "item": {
+        "id": "compatible", "type": "delegation", "target": "client", "content": [
+            {"type": "input_text", "text": "stop music", "extra": True},
+            {"type": "output_text", "text": "resume music"},
+        ],
+    }}
+    event = await live.event(wire)
+    await live.drain()
+    assert event.transcript_context == "check my saved songs"
+    assert live.requests == ["check my saved songs"]
+    assert commands == []
+    await live.event(wire)
+    await live.drain()
+    assert live.requests == ["check my saved songs"]
+    assert commands == []

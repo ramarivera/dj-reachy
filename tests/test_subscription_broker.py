@@ -85,6 +85,14 @@ def test_broker_auth_contains_credentials_and_preserves_consumer_contract() -> N
                 assert "Speak Spanish." in request["session"]["instructions"]
                 assert "Greet the user briefly, then listen." in request["session"]["instructions"]
                 assert "Do not greet first." not in request["session"]["instructions"]
+                # This checks wire delivery, not whether the voice model obeys it.
+                assert (
+                    "After the user confirms a pending supported action, immediately create a client delegation"
+                    in request["session"]["instructions"]
+                )
+                assert "A spoken promise does not execute an app action." in request["session"]["instructions"]
+                assert "obtain explicit user confirmation before any paid music generation" in request["session"]["instructions"]
+                assert "Never generate another track automatically." in request["session"]["instructions"]
                 for malformed in ({"billing": "api", "sdp": "v=0"}, {"billing": "subscription", "sdp": "x" * 70000}):
                     result = client.post(
                         broker + "/session", headers={"Authorization": f"Bearer {token}"}, json=malformed
