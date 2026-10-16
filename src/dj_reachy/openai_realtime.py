@@ -66,6 +66,7 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
         self._audio_mute_owner: str | None = None
         self._response_done_event = asyncio.Event()
         self._waiting_for_response = False
+        self._music_ready_notice: asyncio.Event | None = None
         self._tool_tasks: dict[str, asyncio.Task[None]] = {}
         self._subscription_tasks: dict[str, asyncio.Task[None]] = {}
         self._work_tasks: set[asyncio.Task[None]] = set()
@@ -161,6 +162,37 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
                     self._song_task = None
                     self._music_call_active = False
         return await self._dispatch(name, args)
+
+    async def notify_song_ready(self) -> None:
+        """Announce actual generation completion before playback acquires its mute.
+
+        Only the background song task waits here. The live receiver continues
+        accepting conversation, interruption and stop commands throughout.
+        """
+        connection, epoch = self.connection, self._work_epoch
+        if connection is None or not self._current(connection, epoch):
+            return
+        notice = asyncio.Event()
+        self._music_ready_notice = notice
+        text = "The music generation completed successfully. Tell the user their song is ready; playback will start after this announcement."
+        try:
+            if voice_config.VOICE_BACKEND == "subscription":
+                await connection.send_context(text, "speakable", None)
+            else:
+                await connection.conversation.item.create(item={
+                    "type": "message", "role": "system",
+                    "content": [{"type": "input_text", "text": text}],
+                })
+                await connection.response.create(response={"instructions": text})
+            try:
+                await asyncio.wait_for(notice.wait(), 8)
+            except asyncio.TimeoutError:
+                logger.warning("Song-ready speech completion was not confirmed within its bounded wait")
+            if self._current(connection, epoch) and self._drain_queue is not None:
+                await self._drain_queue()
+        finally:
+            if self._music_ready_notice is notice:
+                self._music_ready_notice = None
 
     def schedule_tool_call(self, tool_name: str, args_json: str, call_id: str) -> asyncio.Task[None]:
         """Run API Realtime function calls independently and dedupe completed IDs."""
@@ -482,6 +514,8 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
             turn = getattr(event, "turn", {})
             if isinstance(turn, dict) and turn.get("role") in ("user", "assistant") and turn.get("transcript"):
                 text = turn["transcript"]
+                if turn["role"] == "assistant" and self._music_ready_notice is not None:
+                    self._music_ready_notice.set()
                 if turn["role"] == "user":
                     control = fast_control(text)
                     if control is not None:
@@ -518,6 +552,8 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
                     (24000, np.frombuffer(base64.b64decode(event.delta), dtype=np.int16).reshape(1, -1))
                 )
         elif kind == "response.done":
+            if self._music_ready_notice is not None:
+                self._music_ready_notice.set()
             if self._waiting_for_response:
                 self._response_done_event.set()
                 self._waiting_for_response = False

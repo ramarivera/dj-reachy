@@ -637,3 +637,66 @@ async def test_duplicate_controls_preserve_music_and_paused_conversation_audio(
     finally:
         await music.StopMusic()(actor.deps)
         await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_real_playback_without_system_mpg123(
+    actor: PlaybackActor, real_mp3: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The installed app must decode saved MP3s with no system decoder on PATH."""
+    monkeypatch.setenv("PATH", str(tmp_path))
+
+    async def native_drain() -> bool:
+        """Represent the consumer's fence so natural EOF preserves submitted PCM."""
+        return True
+
+    actor.handler._drain_queue = native_drain
+    stopped = await asyncio.wait_for(music._play_mp3(str(real_mp3), actor.deps), 8)
+    frames = []
+    while not actor.handler.output_queue.empty():
+        item = actor.handler.output_queue.get_nowait()
+        if isinstance(item, tuple) and len(item) == 2 and isinstance(item[1], np.ndarray):
+            frames.append(item[1].reshape(-1))
+    assert not stopped and not actor.owners
+    assert frames and 69000 <= sum(frame.size for frame in frames) <= 75000
+    assert max(int(np.max(np.abs(frame.astype(np.int32)))) for frame in frames) > 100
+    assert actor.dancer.feed_count > 50
+    assert music._active_decoder is None and music._playback_pause is None
+
+
+@pytest.mark.asyncio
+async def test_generation_announces_ready_before_playback_mutes_conversation(
+    actor: PlaybackActor, real_mp3: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep the generation job cancellable while its actual ready notice speaks."""
+    ready_started, release_notice = asyncio.Event(), asyncio.Event()
+    order: list[str] = []
+
+    async def compose(*_args: object, **_kwargs: object) -> str:
+        order.append("generated")
+        return str(real_mp3)
+
+    async def notice() -> None:
+        order.append("ready")
+        ready_started.set()
+        await release_notice.wait()
+
+    async def play(*_args: object, **_kwargs: object) -> bool:
+        order.append("playing")
+        return False
+
+    monkeypatch.setattr(music, "_compose_music", compose)
+    monkeypatch.setattr(music, "_play_mp3", play)
+    monkeypatch.setattr(actor.handler, "notify_song_ready", notice, raising=False)
+    task = asyncio.create_task(music.MakeSongAndDance()(actor.deps, prompt="A test song", music_length_ms=3000))
+    try:
+        await asyncio.wait_for(ready_started.wait(), 0.5)
+        assert not task.done() and order == ["generated", "ready"]
+        assert not actor.owners
+        release_notice.set()
+        result = await asyncio.wait_for(task, 0.5)
+        assert result["status"] == "completed"
+        assert order == ["generated", "ready", "playing"]
+    finally:
+        release_notice.set()
+        await asyncio.gather(task, return_exceptions=True)

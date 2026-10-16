@@ -1,8 +1,10 @@
 import os
 import re
+import sys
 import json
 import stat
 import time
+import shutil
 import signal
 import asyncio
 import logging
@@ -545,14 +547,13 @@ async def _play_mp3(
     output_drained = False
     try:
         handler.mute_output_audio(owner)
+        executable = shutil.which("mpg123")
+        command = (
+            [executable, "-q", "-s", "--mono", "--rate", str(OPEN_AI_OUTPUT_SAMPLE_RATE), path]
+            if executable else [sys.executable, "-m", "dj_reachy.audio.decode_mp3", path]
+        )
         proc = await asyncio.create_subprocess_exec(
-            "mpg123",
-            "-q",
-            "-s",
-            "--mono",
-            "--rate",
-            str(OPEN_AI_OUTPUT_SAMPLE_RATE),
-            path,
+            *command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             pass_fds=(source_fd,) if source_fd is not None else (),
@@ -754,6 +755,11 @@ class MakeSongAndDance(Tool):
             if cancel_event.is_set():
                 _discard_local_track(path)
                 return {"status": "cancelled", "message": "Local result discarded; provider work may have continued."}
+            notify = getattr(deps.openai_realtime_handler, "notify_song_ready", None)
+            if callable(notify):
+                await cast(Callable[[], Awaitable[None]], notify)()
+            if cancel_event.is_set():
+                return {"status": "stopped", "song_path": path, "message": "Saved song retained; playback cancelled."}
             if _generation_cancel is cancel_event:
                 _generation_cancel = None
             stopped = await _play_mp3(path, deps, cancel_event)
