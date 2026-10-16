@@ -299,13 +299,14 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
         control = fast_control(transcript or request)
         correlation = turn if transcript and isinstance(turn, int) else f"delegation:{identity}"
         control_task = self._control_for_turn(correlation, control) if control else None
+        task_context = request if transcript and control is None else ""
         if not transcript:
             transcript = "Live model delegation request (not a verbatim user transcript):\n" + request
         connection, epoch = self.connection, self._work_epoch
 
         async def run() -> None:
             if self._current(connection, epoch):
-                await self._run_subscription_delegation(identity, transcript, control_task)
+                await self._run_subscription_delegation(identity, transcript, control_task, task_context=task_context)
 
         task = asyncio.create_task(run(), name=f"delegation-{identity}")
         self._subscription_tasks[identity] = task
@@ -315,7 +316,7 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
         task.add_done_callback(self._work_tasks.discard)
 
     async def _run_subscription_delegation(
-        self, identity: str, transcript: str, control_task: asyncio.Task[dict[str, Any]] | None = None
+        self, identity: str, transcript: str, control_task: asyncio.Task[dict[str, Any]] | None = None, *, task_context: str = ""
     ) -> None:
         connection, epoch = self.connection, self._work_epoch
         if connection is None:
@@ -338,7 +339,14 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
             await connection.send_context(
                 "The app is working on the current request. No result yet.", "commentary", identity
             )
+            from dj_reachy.voice_planner import DELEGATION_CONTEXT_PREFIX
+
             history: list[dict[str, Any]] = []
+            if task_context:
+                history.append({
+                    "type": "message", "role": "assistant",
+                    "content": DELEGATION_CONTEXT_PREFIX + task_context,
+                })
             seen_calls: set[str] = set()
             from dj_reachy.voice_planner import MAX_CALLS, MAX_ROUNDS, validate_app_call
 
