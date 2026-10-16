@@ -562,11 +562,13 @@ async def _play_mp3(
         stderr_task = asyncio.create_task(_drain_pipe(proc.stderr))
         dancer.start()
         loop = asyncio.get_running_loop()
+        pacing_deadline: float | None = None
         data = b""
         while not stop_event.is_set() and not (cancel_event and cancel_event.is_set()):
             if not pause_event.is_set():
                 # Consumer-side backpressure holds the decoder's bounded read-ahead.
                 # No SIGSTOP: a stopped process cannot handle SIGTERM during shutdown.
+                pacing_deadline = None
                 await asyncio.sleep(0.02)
                 continue
             if not data:
@@ -584,14 +586,23 @@ async def _play_mp3(
                 if len(data) % 2:
                     raise RuntimeError("mpg123 returned incomplete PCM samples")
                 pcm = np.frombuffer(data, dtype=np.int16)
+                if pacing_deadline is None:
+                    pacing_deadline = loop.time()
                 dancer.feed(pcm)
-                handler.output_queue.put_nowait((OPEN_AI_OUTPUT_SAMPLE_RATE, pcm.reshape(1, -1)))
+                await handler.output_queue.put((OPEN_AI_OUTPUT_SAMPLE_RATE, pcm.reshape(1, -1)))
                 handler.last_activity_time = loop.time()
                 duration = pcm.size / OPEN_AI_OUTPUT_SAMPLE_RATE
                 data = b""
-            # Relative pacing deliberately doesn't catch up after pause or a slow callback.
+            # Account for processing inside the sample budget, as the original
+            # player did. Sleeping a full duration here accumulates drift on
+            # every chunk. The paused branch rebases this clock before resume.
+            pacing_deadline += duration
+            delay = max(0.0, pacing_deadline - loop.time())
             try:
-                await asyncio.wait_for(stop_event.wait(), duration)
+                if delay:
+                    await asyncio.wait_for(stop_event.wait(), delay)
+                else:
+                    await asyncio.sleep(0)
             except asyncio.TimeoutError:
                 pass
         stopped = stop_event.is_set() or bool(cancel_event and cancel_event.is_set())

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 import os
+import time
 import shutil
 import asyncio
 import threading
@@ -119,6 +120,57 @@ def real_mp3(tmp_path_factory: pytest.TempPathFactory) -> Path:
     subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
     assert path.stat().st_size > 1000
     return path
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("decoder_startup_delay", [0.0, 0.25])
+async def test_music_processing_overhead_does_not_accumulate_playback_drift(
+    actor: PlaybackActor, real_mp3: Path, monkeypatch: pytest.MonkeyPatch, decoder_startup_delay: float
+) -> None:
+    """Keep the real decoder on its sample clock despite per-frame analysis work."""
+    sent: list[tuple[float, int]] = []
+    loop = asyncio.get_running_loop()
+    original_read = asyncio.StreamReader.readexactly
+    decoder_ready_at: float | None = None
+
+    async def delayed_read(reader: asyncio.StreamReader, size: int) -> bytes:
+        """Preserve the startup delay across the player's bounded read retries."""
+        nonlocal decoder_ready_at
+        if decoder_ready_at is None:
+            decoder_ready_at = loop.time() + decoder_startup_delay
+        await asyncio.sleep(max(0.0, decoder_ready_at - loop.time()))
+        return await original_read(reader, size)
+
+    monkeypatch.setattr(asyncio.StreamReader, "readexactly", delayed_read)
+
+    class TimedQueue(asyncio.Queue[object]):
+        """Observe actual producer enqueue times, not an imagined scheduler."""
+
+        def put_nowait(self, item: object) -> None:
+            """Keep only timing/sample counts from the generated fixture."""
+            if isinstance(item, tuple) and len(item) == 2 and isinstance(item[1], np.ndarray):
+                sent.append((loop.time(), item[1].size))
+            super().put_nowait(item)
+
+    actor.handler.output_queue = TimedQueue()
+    original_feed = actor.dancer.feed
+
+    def slow_feed(frame: NDArray[np.int16]) -> None:
+        """Represent bounded analysis work that must be inside the audio budget."""
+        time.sleep(0.006)
+        original_feed(frame)
+
+    monkeypatch.setattr(actor.dancer, "feed", slow_feed)
+    assert await music._play_mp3(str(real_mp3), actor.deps) is False
+    assert len(sent) > 60
+    sample_seconds = sum(samples for _, samples in sent) / music.OPEN_AI_OUTPUT_SAMPLE_RATE
+    assert sample_seconds == pytest.approx(3.0, abs=0.05)
+    expected_span = sum(samples for _, samples in sent[:-1]) / music.OPEN_AI_OUTPUT_SAMPLE_RATE
+    actual_span = sent[-1][0] - sent[0][0]
+    assert actual_span <= expected_span + 0.18, (
+        f"Music pacing accumulated processing time: {actual_span:.3f}s for {expected_span:.3f}s of PCM"
+    )
+    assert actual_span >= expected_span - 0.08, "Producer burst the track instead of pacing it"
 
 
 @pytest.mark.asyncio
