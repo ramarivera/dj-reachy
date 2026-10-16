@@ -5,3 +5,4 @@ pause_music
 resume_music
 stop_music
 play_saved_song
+camera

@@ -34,7 +34,7 @@ class Camera(Tool):
             logger.warning("camera: empty question")
             return {"error": "question must be a non-empty string"}
 
-        logger.info("Tool call: camera question=%s", image_query[:120])
+        logger.info("Tool call: camera")
 
         # Get frame from camera worker buffer (like main_works.py)
         if deps.camera_worker is not None:
@@ -59,10 +59,17 @@ class Camera(Tool):
                 else {"error": "vision returned non-string"}
             )
 
-        # Encode image directly to JPEG bytes without writing to file
-        success, buffer = cv2.imencode('.jpg', frame)
+        # Bound an in-memory observation to the existing broker history budget.
+        # Camera frames and user questions are never written to logs or files.
+        height, width = frame.shape[:2]
+        scale = min(1.0, 480 / max(height, width))
+        if scale < 1.0:
+            frame = cv2.resize(frame, (max(1, int(width * scale)), max(1, int(height * scale))), interpolation=cv2.INTER_AREA)
+        success, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 65])
         if not success:
             raise RuntimeError("Failed to encode frame as JPEG")
+        if buffer.size > 60000:
+            return {"error": "Camera observation exceeds the bounded image allowance"}
 
         b64_encoded = base64.b64encode(buffer.tobytes()).decode("utf-8")
         return {"b64_im": b64_encoded}

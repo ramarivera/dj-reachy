@@ -1,6 +1,9 @@
 "use strict";
 const $ = (id) => document.getElementById(id);
-const api = "/api/dj-reachy";
+// Resolve relative to the loaded script, preserving a Desktop proxy prefix.
+const appBase = new URL("../", document.currentScript.src);
+const api = new URL("api/dj-reachy", appBase).href;
+const songs = new URL("songs", appBase).href;
 let settings;
 function status(text, error = false) {
   $("status").textContent = text;
@@ -49,7 +52,7 @@ async function refreshStatus() {
   $("voice-link").hidden = !state.browser_voice_available;
 }
 async function refreshSongs() {
-  const data = await request("/songs");
+  const data = await request(songs);
   const target = $("songs"); target.replaceChildren();
   if (!data.songs.length) { target.textContent = "No saved tracks yet."; return; }
   for (const song of data.songs) {
@@ -67,11 +70,11 @@ async function refreshSongs() {
     const remove = document.createElement("button"); remove.textContent = "Delete"; remove.className = "stop";
     remove.addEventListener("click", async () => {
       if (!window.confirm(`Delete saved track ${song.filename}?`)) return;
-      try { await request(`/songs/${encodeURIComponent(song.filename)}`, "DELETE"); await refreshSongs(); status("Saved track deleted."); }
+      try { await request(`${songs}/${encodeURIComponent(song.filename)}`, "DELETE"); await refreshSongs(); status("Saved track deleted."); }
       catch (error) { status(error.message, true); }
     });
     const audio = document.createElement("audio"); audio.controls = true; audio.preload = "none";
-    audio.src = `/songs/${encodeURIComponent(song.filename)}`;
+    audio.src = `${songs}/${encodeURIComponent(song.filename)}`;
     controls.append(replay, remove); row.append(title, filename, controls, audio); target.append(row);
   }
 }

@@ -381,7 +381,10 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
                     if not self._current(connection, epoch):
                         return
                     history.append({"type": "function_call_output", "call_id": call_id, "output": json.dumps(result)})
-                    await connection.send_context(json.dumps({"tool": name, "result": result}), "commentary", identity)
+                    # Only the host vision planner receives image bytes. Do not
+                    # chunk base64 through the Live model's text context channel.
+                    progress = {"status": "image_captured"} if name == "camera" and "b64_im" in result else result
+                    await connection.send_context(json.dumps({"tool": name, "result": progress}), "commentary", identity)
             raise RuntimeError("App planner reached its bounded round limit")
         except asyncio.CancelledError:
             outcome = "cancelled"
