@@ -267,6 +267,13 @@ class ReachyMiniConversationApp(ReachyMiniApp):  # type: ignore[misc]
     custom_app_url = "http://0.0.0.0:7860/"
     dont_start_webserver = False
 
+    def __init__(self, running_on_wireless: bool = False) -> None:
+        """Select camera-free construction before the SDK wrapper creates media."""
+        args, _ = parse_args()
+        if args.no_camera or args.settings_only:
+            self.request_media_backend = "no_media"
+        super().__init__(running_on_wireless=running_on_wireless)
+
     def run(self, reachy_mini: ReachyMini, stop_event: threading.Event) -> None:
         """Use SDK-owned serving and user-owned configuration in managed mode."""
         loop = asyncio.new_event_loop()

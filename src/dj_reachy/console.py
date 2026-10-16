@@ -123,6 +123,8 @@ class LocalStream:
         self._media_started = False
         self._play_epoch = 0
         self._playback_clock = 0.0
+        self._quiet_seconds = 0.0
+        self._native_idle = False
         self._pcm_converter: StreamingPCMConverter | None = None
         self._pcm_rates: tuple[int, int] | None = None
         self._output_changed = asyncio.Event()
@@ -280,6 +282,8 @@ class LocalStream:
                 raise RuntimeError("The selected audio backend cannot flush its playback buffer")
         self.handler.output_queue = asyncio.Queue()
         self._playback_clock = 0.0
+        self._quiet_seconds = 0.0
+        self._native_idle = False
         self._pcm_converter = None
         self._pcm_rates = None
         if caller_loop is None:
@@ -405,6 +409,34 @@ class LocalStream:
             if self._flush_task is not None:
                 await asyncio.shield(self._flush_task)
             chunk = mono[offset : offset + chunk_samples]
+            audio = self._robot.media.audio
+            clear = getattr(audio, "clear_player", None) or getattr(audio, "clear_output_buffer", None)
+            suppress_idle = False
+            if self._output_tail_delay > 0 and callable(clear):
+                quiet = float(np.mean(chunk * chunk)) <= 1e-8
+                self._quiet_seconds = self._quiet_seconds + chunk.size / sample_rate if quiet else 0.0
+                if quiet and self._quiet_seconds >= max(0.6, self._output_tail_delay + 0.2):
+                    # WebRTC sends carrier silence while listening. Continuing
+                    # that cue indefinitely accumulates sender/wall-clock debt.
+                    # Keep pacing the silence, but let the native mixer supply it.
+                    self._native_idle = True
+                    suppress_idle = True
+                elif not quiet and self._native_idle:
+                    # The entire conservative drain allowance plus write-ahead
+                    # has been quiet, so no voiced native tail can be truncated.
+                    # Honor the remaining silence before anchoring a fresh cue.
+                    remaining = max(0.0, self._playback_clock - loop.time())
+                    if remaining:
+                        try:
+                            await asyncio.wait_for(changed.wait(), remaining)
+                            return
+                        except asyncio.TimeoutError:
+                            pass
+                    await self._playback_io.call(clear)
+                    if epoch != self._play_epoch or self._stop_event.is_set():
+                        return
+                    self._native_idle = False
+                    self._playback_clock = loop.time()
 
             def push() -> None:
                 # A running native write finishes before the serialized flush;
@@ -412,7 +444,8 @@ class LocalStream:
                 if epoch == self._play_epoch and not self._stop_event.is_set():
                     self._robot.media.push_audio_sample(chunk)
 
-            await self._playback_io.call(push)
+            if not suppress_idle:
+                await self._playback_io.call(push)
             if epoch != self._play_epoch or self._stop_event.is_set():
                 return
             self._playback_clock += chunk.size / sample_rate
