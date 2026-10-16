@@ -1,6 +1,7 @@
 """Local audio loop and user-owned app-manager settings page."""
 
 import os
+import time
 import asyncio
 import logging
 import threading
@@ -123,6 +124,7 @@ class LocalStream:
         self._media_started = False
         self._play_epoch = 0
         self._playback_clock = 0.0
+        self._playback_interrupt = threading.Event()
         self._quiet_seconds = 0.0
         self._native_idle = False
         self._pcm_converter: StreamingPCMConverter | None = None
@@ -213,6 +215,7 @@ class LocalStream:
 
     def close(self) -> None:
         """Request teardown; never race stop/close against an owned SDK call."""
+        self._playback_interrupt.set()
 
         def cancel() -> None:
             self._stop_event.set()
@@ -247,7 +250,7 @@ class LocalStream:
             done, _ = await asyncio.wait(watched, return_when=asyncio.FIRST_COMPLETED)
             if invalidated in done or epoch != self._play_epoch or self._stop_event.is_set():
                 return False
-            scheduled = max(0.0, self._playback_clock - loop.time())
+            scheduled = max(0.0, self._playback_clock - time.monotonic())
             tail_done, _ = await asyncio.wait({invalidated}, timeout=self._output_tail_delay + scheduled)
             return not tail_done and epoch == self._play_epoch and not self._stop_event.is_set() and not self._closing
         finally:
@@ -270,6 +273,8 @@ class LocalStream:
         owner_loop = getattr(self, "_asyncio_loop", None)
         if owner_loop is not None and caller_loop is not owner_loop:
             if not owner_loop.is_closed():
+                # Wake a paced owner even if the event loop cannot dispatch yet.
+                self._playback_interrupt.set()
                 owner_loop.call_soon_threadsafe(self.clear_audio_queue)
             return
         if getattr(self, "_closing", False):
@@ -280,6 +285,10 @@ class LocalStream:
             clear = getattr(audio, "clear_player", None) or getattr(audio, "clear_output_buffer", None)
             if not callable(clear):
                 raise RuntimeError("The selected audio backend cannot flush its playback buffer")
+        interrupt = getattr(self, "_playback_interrupt", None)
+        if interrupt is not None:
+            interrupt.set()
+        self._playback_interrupt = threading.Event()
         self.handler.output_queue = asyncio.Queue()
         self._playback_clock = 0.0
         self._quiet_seconds = 0.0
@@ -310,6 +319,7 @@ class LocalStream:
 
     async def _shutdown_audio(self) -> None:
         """Bound native shutdown without pretending cancellation kills threads."""
+        self._playback_interrupt.set()
         self._output_changed.set()
         cleanup = asyncio.create_task(self._drain_and_stop_audio(), name="native-audio-shutdown")
         done, _ = await asyncio.wait({cleanup}, timeout=self._IO_SHUTDOWN_TIMEOUT)
@@ -384,88 +394,87 @@ class LocalStream:
                 await self._submit_native_audio(frame, rates[1], epoch)
 
     async def _submit_native_audio(self, frame: NDArray[np.float32], sample_rate: int, epoch: int) -> None:
-        """Pace contiguous samples with bounded lookahead, interruptible on flush.
+        """Pace <=100ms owner batches, with <=20ms SDK writes and <=100ms lead.
 
-        The SDK owns the physical clock. This producer clock limits write-ahead
-        and keeps incoming packet boundaries from restarting the schedule.
+        Only the existing serialized owner writes or sleeps. Completion resumes
+        on the main loop once per batch, not once per native chunk. The epoch's
+        thread-safe signal interrupts pacing before a serialized flush/stop.
         """
-        loop = asyncio.get_running_loop()
-        changed = self._output_changed
+        interrupted = self._playback_interrupt
         mono = frame.reshape(-1)
         chunk_samples = max(1, sample_rate // 50)
-        for offset in range(0, mono.size, chunk_samples):
-            if epoch != self._play_epoch or self._stop_event.is_set():
-                return
-            now = loop.time()
-            if now > self._playback_clock + 0.2:
-                self._playback_clock = now
-            delay = max(0.0, self._playback_clock - 0.1 - now)
-            if delay:
-                try:
-                    await asyncio.wait_for(changed.wait(), delay)
+        batch_samples = max(1, sample_rate // 10)
+        audio = self._robot.media.audio
+        clear = getattr(audio, "clear_player", None) or getattr(audio, "clear_output_buffer", None)
+
+        def push_batch(batch: NDArray[np.float32]) -> None:
+            for offset in range(0, batch.size, chunk_samples):
+                if interrupted.is_set() or epoch != self._play_epoch:
                     return
-                except asyncio.TimeoutError:
-                    pass
+                chunk = batch[offset : offset + chunk_samples]
+                duration = chunk.size / sample_rate
+                now = time.monotonic()
+                if now > self._playback_clock + 0.2:
+                    self._playback_clock = now
+                delay = max(0.0, self._playback_clock + duration - 0.1 - now)
+                if interrupted.wait(delay):
+                    return
+                suppress_idle = False
+                if self._output_tail_delay > 0 and callable(clear):
+                    quiet = float(np.mean(chunk * chunk)) <= 1e-8
+                    self._quiet_seconds = self._quiet_seconds + duration if quiet else 0.0
+                    if quiet and self._quiet_seconds >= max(0.6, self._output_tail_delay + 0.2):
+                        # Preserve carrier timing without aging the native cue.
+                        self._native_idle = True
+                        suppress_idle = True
+                    elif not quiet and self._native_idle:
+                        # Drain preceding speech and a potentially wider tail.
+                        if interrupted.wait(max(0.0, self._playback_clock - time.monotonic())):
+                            return
+                        clear()
+                        if interrupted.is_set() or epoch != self._play_epoch:
+                            return
+                        self._native_idle = False
+                        self._playback_clock = time.monotonic()
+                if interrupted.is_set() or epoch != self._play_epoch:
+                    return
+                if not suppress_idle:
+                    self._robot.media.push_audio_sample(chunk)
+                if interrupted.is_set() or epoch != self._play_epoch:
+                    return
+                self._playback_clock += duration
+
+        for offset in range(0, mono.size, batch_samples):
+            if interrupted.is_set() or epoch != self._play_epoch or self._stop_event.is_set():
+                return
             if self._flush_task is not None:
                 await asyncio.shield(self._flush_task)
-            chunk = mono[offset : offset + chunk_samples]
-            audio = self._robot.media.audio
-            clear = getattr(audio, "clear_player", None) or getattr(audio, "clear_output_buffer", None)
-            suppress_idle = False
-            if self._output_tail_delay > 0 and callable(clear):
-                quiet = float(np.mean(chunk * chunk)) <= 1e-8
-                self._quiet_seconds = self._quiet_seconds + chunk.size / sample_rate if quiet else 0.0
-                if quiet and self._quiet_seconds >= max(0.6, self._output_tail_delay + 0.2):
-                    # WebRTC sends carrier silence while listening. Continuing
-                    # that cue indefinitely accumulates sender/wall-clock debt.
-                    # Keep pacing the silence, but let the native mixer supply it.
-                    self._native_idle = True
-                    suppress_idle = True
-                elif not quiet and self._native_idle:
-                    # The entire conservative drain allowance plus write-ahead
-                    # has been quiet, so no voiced native tail can be truncated.
-                    # Honor the remaining silence before anchoring a fresh cue.
-                    remaining = max(0.0, self._playback_clock - loop.time())
-                    if remaining:
-                        try:
-                            await asyncio.wait_for(changed.wait(), remaining)
-                            return
-                        except asyncio.TimeoutError:
-                            pass
-                    await self._playback_io.call(clear)
-                    if epoch != self._play_epoch or self._stop_event.is_set():
-                        return
-                    self._native_idle = False
-                    self._playback_clock = loop.time()
-
-            def push() -> None:
-                # A running native write finishes before the serialized flush;
-                # a stale queued write must not touch replacement PCM.
-                if epoch == self._play_epoch and not self._stop_event.is_set():
-                    self._robot.media.push_audio_sample(chunk)
-
-            if not suppress_idle:
-                await self._playback_io.call(push)
-            if epoch != self._play_epoch or self._stop_event.is_set():
-                return
-            self._playback_clock += chunk.size / sample_rate
+            batch = mono[offset : offset + batch_samples]
+            await self._playback_io.call(lambda: push_batch(batch))
 
     async def play_loop(self) -> None:
         """Deliver ordered PCM through the single playback owner."""
+        pending: tuple[int, NDArray[np.int16]] | AdditionalOutputs | None = None
+        pending_epoch = self._play_epoch
+        output: tuple[int, NDArray[np.int16]] | AdditionalOutputs | None
         try:
             while not self._stop_event.is_set():
                 epoch = self._play_epoch
-                self._emit_task = asyncio.create_task(self.handler.emit())
-                try:
-                    output = await self._emit_task
-                except asyncio.CancelledError:
-                    current = asyncio.current_task()
-                    if current is not None and current.cancelling():
-                        raise
-                    # A flush replaced the queue while emit was waiting on it.
-                    continue
-                finally:
-                    self._emit_task = None
+                if pending is not None and pending_epoch == epoch:
+                    output, pending = pending, None
+                else:
+                    pending = None
+                    self._emit_task = asyncio.create_task(self.handler.emit())
+                    try:
+                        output = await self._emit_task
+                    except asyncio.CancelledError:
+                        current = asyncio.current_task()
+                        if current is not None and current.cancelling():
+                            raise
+                        # A flush replaced the queue while emit was waiting.
+                        continue
+                    finally:
+                        self._emit_task = None
                 if isinstance(output, _PlaybackFence):
                     if epoch == self._play_epoch == output.epoch and not output.completed.done():
                         await self._finish_native_conversion(epoch)
@@ -482,7 +491,28 @@ class LocalStream:
                             audio_data = audio_data.T
                         if audio_data.shape[1] > 1:
                             audio_data = audio_data[:, 0]
-                    frame = audio_to_float32(audio_data).reshape(-1)
+                    frame: NDArray[np.float32] = audio_to_float32(audio_data).reshape(-1)
+                    # Never wait for more audio. Stop at the first incompatible
+                    # format, fence or control, retaining that exact FIFO item.
+                    frames = [frame]
+                    samples = frame.size
+                    while samples < max(1, sample_rate // 10):
+                        try:
+                            following = self.handler.output_queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            break
+                        if (
+                            not isinstance(following, tuple)
+                            or following[0] != sample_rate
+                            or following[1].ndim != 1
+                            or samples + following[1].size > max(1, sample_rate // 10)
+                        ):
+                            pending, pending_epoch = following, epoch
+                            break
+                        frames.append(audio_to_float32(following[1]).reshape(-1))
+                        samples += following[1].size
+                    if len(frames) > 1:
+                        frame = np.concatenate(frames)
                     rates = (sample_rate, output_rate)
                     if rates != self._pcm_rates:
                         await self._finish_native_conversion(epoch)
