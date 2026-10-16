@@ -9,6 +9,7 @@ from argparse import Namespace
 from unittest.mock import Mock
 from collections.abc import Iterator
 
+import numpy as np
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -36,7 +37,10 @@ def test_managed_launch_uses_user_home_not_sdk_instance(tmp_path: Path, monkeypa
     status = DaemonStatus(robot_name="fixture", state=DaemonState.RUNNING,
                           wireless_version=False, desktop_app_daemon=False,
                           stream_enabled=False, simulation_enabled=False, backend_status=None)
-    robot = SimpleNamespace(client=SimpleNamespace(get_status=lambda: status, disconnect=Mock()), media=Mock())
+    robot = SimpleNamespace(
+        client=SimpleNamespace(get_status=lambda: status, disconnect=Mock()), media=Mock(),
+        get_current_head_pose=lambda: np.eye(4), enable_motors=Mock(), wake_up=Mock(),
+    )
     user_home = tmp_path / "owned"
     package_home = tmp_path / "site-packages"
     package_home.mkdir()
@@ -52,6 +56,8 @@ def test_managed_launch_uses_user_home_not_sdk_instance(tmp_path: Path, monkeypa
     app = FastAPI()
     args = Namespace(debug=False, no_camera=True, head_tracker=None, gradio=False)
     main.run(args, robot=robot, settings_app=app, instance_path=str(package_home))
+    robot.enable_motors.assert_called_once_with()
+    robot.wake_up.assert_not_called()
     assert config.APP_HOME == user_home
     assert config.SONGS_DIR == user_home / "songs"
     assert config.RUNTIME_SETTINGS_PATH == user_home / "settings.json"

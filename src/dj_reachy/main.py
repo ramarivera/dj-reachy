@@ -149,6 +149,29 @@ def _initialize_audio_only(robot: ReachyMini, *, prefer_gstreamer: bool) -> None
     media._init_audio("INFO")
 
 
+def _prepare_robot_motion(robot: ReachyMini) -> None:
+    """Enable torque at the present pose, then use the SDK's bounded wake-up.
+
+    The app manager does not enable motors when starting an app. A robot left
+    sleeping by the previous app otherwise ignores the movement worker's targets.
+    """
+    import numpy as np
+
+    from reachy_mini.reachy_mini import SLEEP_HEAD_POSE
+
+    pose = np.asarray(robot.get_current_head_pose(), dtype=np.float64)
+    if pose.shape != (4, 4) or not np.isfinite(pose).all():
+        raise RuntimeError("Cannot prepare motion without a valid current robot pose")
+    translation = float(np.linalg.norm(pose[:3, 3] - SLEEP_HEAD_POSE[:3, 3]))
+    relative_rotation = pose[:3, :3].T @ SLEEP_HEAD_POSE[:3, :3]
+    angle = float(np.arccos(np.clip((np.trace(relative_rotation) - 1) / 2, -1, 1)))
+    # Enabling first holds the current measured pose on SDK 1.12. Only then
+    # submit a wake-up trajectory; setting targets before enable loses them.
+    robot.enable_motors()
+    if translation <= 0.01 and angle <= 0.2:
+        robot.wake_up()
+
+
 def run(
     args: argparse.Namespace,
     robot: ReachyMini | None = None,
@@ -218,6 +241,7 @@ def run(
             robot, prefer_gstreamer=getattr(args, "wireless_version", False) and getattr(args, "on_device", False)
         )
 
+    _prepare_robot_motion(robot)
     camera_worker, _, vision_manager = handle_vision_stuff(args, robot)
     movement = MovementManager(current_robot=robot, camera_worker=camera_worker)
     wobbler = HeadWobbler(set_speech_offsets=movement.set_speech_offsets)
