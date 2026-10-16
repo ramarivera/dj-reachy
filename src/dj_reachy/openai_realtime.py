@@ -8,6 +8,7 @@ import logging
 from time import monotonic
 from typing import Any, Final, Literal, Protocol, cast
 from datetime import datetime
+from collections.abc import Callable, Awaitable
 
 import numpy as np
 from openai import AsyncOpenAI
@@ -55,6 +56,7 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
         self.connection: Any = None
         self.client: Any = None
         self.output_queue: asyncio.Queue[tuple[int, NDArray[np.int16]] | AdditionalOutputs] = asyncio.Queue()
+        self._drain_queue: Callable[[], Awaitable[bool]] | None = None
         self.last_activity_time = monotonic()
         self.start_time = self.last_activity_time
         self.is_idle_tool_call = False

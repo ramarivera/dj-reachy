@@ -8,8 +8,9 @@ import asyncio
 import logging
 import threading
 from uuid import uuid4
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, cast
 from pathlib import Path
+from collections.abc import Callable, Awaitable
 
 import httpx
 import numpy as np
@@ -541,6 +542,7 @@ async def _play_mp3(
     _playback_done = done_event
     proc: asyncio.subprocess.Process | None = None
     stderr_task: asyncio.Task[None] | None = None
+    output_drained = False
     try:
         handler.mute_output_audio(owner)
         proc = await asyncio.create_subprocess_exec(
@@ -597,6 +599,32 @@ async def _play_mp3(
             return_code = await asyncio.wait_for(proc.wait(), 1)
             if return_code != 0:
                 raise RuntimeError(f"mpg123 failed with exit code {return_code}")
+            drain_output = cast(Callable[[], Awaitable[bool]] | None, getattr(handler, "_drain_queue", None))
+            if callable(drain_output):
+                while not stop_event.is_set() and not (cancel_event and cancel_event.is_set()):
+                    if not pause_event.is_set():
+                        await asyncio.sleep(0.02)
+                        continue
+                    pending_drain = asyncio.ensure_future(drain_output())
+                    try:
+                        while not pending_drain.done():
+                            if stop_event.is_set() or (cancel_event and cancel_event.is_set()) or not pause_event.is_set():
+                                break
+                            await asyncio.wait({pending_drain}, timeout=0.02)
+                        output_drained = bool(await pending_drain) if pending_drain.done() else False
+                    finally:
+                        if not pending_drain.done():
+                            pending_drain.cancel()
+                        await asyncio.gather(pending_drain, return_exceptions=True)
+                    if not pause_event.is_set():
+                        output_drained = False
+                    if output_drained:
+                        break
+                    # An old epoch may finish after a rapid pause/resume. Keep
+                    # the owner and obtain a fresh fence, never revive its PCM.
+                    await asyncio.sleep(0.02)
+                stopped = stop_event.is_set() or bool(cancel_event and cancel_event.is_set()) or not output_drained
+                output_drained = output_drained and not stopped
         return stopped
     finally:
 
@@ -609,7 +637,8 @@ async def _play_mp3(
                     await _reap_decoder(proc, drain)
             finally:
                 try:
-                    _clear_handler_audio(handler)
+                    if not output_drained:
+                        _clear_handler_audio(handler)
                     async with motion_lock:
                         await asyncio.to_thread(dancer.stop)
                 finally:

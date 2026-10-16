@@ -5,6 +5,7 @@ import threading
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import Mock
+from collections.abc import Callable, Coroutine
 
 import numpy as np
 import pytest
@@ -103,6 +104,130 @@ def make_stream(media: BlockingMedia) -> LocalStream:
     handler.shutdown = shutdown
     handler.shutdown_complete = False
     return LocalStream(cast(OpenaiRealtimeHandler, handler), cast(ReachyMini, SimpleNamespace(media=media)))
+
+
+def native_pipeline(mixer: SimpleNamespace) -> SimpleNamespace:
+    """Preserve GI's next/result-value interface, which is not a Python iterator."""
+    def iterate_recurse() -> SimpleNamespace:
+        items = iter([
+            (SimpleNamespace(value_nick="ok"), mixer),
+            (SimpleNamespace(value_nick="done"), None),
+        ])
+        return SimpleNamespace(next=lambda: next(items), resync=lambda: None)
+
+    return SimpleNamespace(iterate_recurse=iterate_recurse)
+
+
+@pytest.mark.asyncio
+async def test_native_stream_configures_one_coherent_jitter_window() -> None:
+    """The app's native launch must buffer late PCM without resetting it early."""
+    values = {"latency": 0}
+    mixer = SimpleNamespace(
+        get_factory=lambda: SimpleNamespace(get_name=lambda: "audiomixer"),
+        get_property=lambda name: values[name],
+        set_property=lambda name, value: values.__setitem__(name, value),
+    )
+    backend = SimpleNamespace(
+        _pipeline=native_pipeline(mixer),
+        GAP_RESET_NS=200_000_000,
+    )
+    media = BlockingMedia("")
+    media.audio = backend
+    stream = make_stream(media)
+    try:
+        assert values["latency"] == 320_000_000
+        assert backend.GAP_RESET_NS == 520_000_000
+    finally:
+        await stream._shutdown_audio()
+
+
+@pytest.mark.asyncio
+async def test_native_stream_keeps_an_existing_wider_buffer() -> None:
+    """Reattaching a stream must not shrink or repeatedly extend its schedule."""
+    values = {"latency": 640_000_000}
+    mixer = SimpleNamespace(
+        get_factory=lambda: SimpleNamespace(get_name=lambda: "audiomixer"),
+        get_property=lambda name: values[name],
+        set_property=lambda name, value: values.__setitem__(name, value),
+    )
+    backend = SimpleNamespace(
+        _pipeline=native_pipeline(mixer),
+        GAP_RESET_NS=840_000_000,
+    )
+    media = BlockingMedia("")
+    media.audio = backend
+    first = make_stream(media)
+    second = make_stream(media)
+    try:
+        assert values["latency"] == 640_000_000
+        assert backend.GAP_RESET_NS == 840_000_000
+        assert first._output_tail_delay == pytest.approx(0.82)
+        assert second._output_tail_delay == first._output_tail_delay
+    finally:
+        await first._shutdown_audio()
+        await second._shutdown_audio()
+
+
+@pytest.mark.asyncio
+async def test_completion_fence_waits_for_dequeued_native_push_and_tail() -> None:
+    """An empty queue isn't completion while its last native write is in flight."""
+    media = BlockingMedia("playback")
+    stream = make_stream(media)
+    stream._output_tail_delay = 0.08
+    player = asyncio.create_task(stream.play_loop())
+    completion: asyncio.Task[bool] | None = None
+    try:
+        await progress_while_blocked(media)
+        assert stream.handler.output_queue.empty()
+        drain = cast(Callable[[], Coroutine[object, object, bool]] | None, getattr(stream, "drain_audio", None))
+        assert callable(drain), "Native playback has no ordered completion fence"
+        completion = asyncio.create_task(drain())
+        done, _ = await asyncio.wait({completion}, timeout=0.01)
+        assert not done
+        media.release.set()
+        done, _ = await asyncio.wait({completion}, timeout=0.02)
+        assert not done, "Completion ignored the native scheduled tail"
+        assert await asyncio.wait_for(completion, 0.5) is True
+        assert len(media.pushed) == 1
+    finally:
+        stream._stop_event.set()
+        media.release.set()
+        player.cancel()
+        if completion is not None:
+            completion.cancel()
+            await asyncio.gather(completion, return_exceptions=True)
+        await asyncio.gather(player, return_exceptions=True)
+        await stream._shutdown_audio()
+
+
+@pytest.mark.asyncio
+async def test_flush_invalidates_native_completion_without_tail_wait() -> None:
+    """A native tail waiter cannot delay flush or consume replacement PCM."""
+    media = BlockingMedia("")
+    stream = make_stream(media)
+    stream._output_tail_delay = 2.0
+    player = asyncio.create_task(stream.play_loop())
+    completion = asyncio.create_task(stream.drain_audio())
+    try:
+        done, _ = await asyncio.wait({completion}, timeout=0.02)
+        assert not done
+        stream.clear_audio_queue()
+        assert await asyncio.wait_for(completion, 0.2) is False
+        assert stream._flush_task is not None
+        await stream._flush_task
+        stream.handler.output_queue.put_nowait((24000, np.full(8, 42, dtype=np.int16)))
+        for _ in range(1000):
+            if len(media.pushed) == 2:
+                break
+            await asyncio.sleep(0.001)
+        assert len(media.pushed) == 2
+        assert media.calls[-2:] == ["flush", "push"]
+    finally:
+        stream._stop_event.set()
+        player.cancel()
+        completion.cancel()
+        await asyncio.gather(player, completion, return_exceptions=True)
+        await stream._shutdown_audio()
 
 
 async def progress_while_blocked(media: BlockingMedia) -> None:

@@ -22,10 +22,20 @@ from reachy_mini import ReachyMini
 from dj_reachy.config import config
 from dj_reachy.openai_realtime import OpenaiRealtimeHandler
 from dj_reachy.runtime_settings import register_runtime_settings_routes
+from dj_reachy.audio.native_playback import configure_native_playback
 
 
 logger = logging.getLogger(__name__)
 _AudioResult = TypeVar("_AudioResult")
+
+
+class _PlaybackFence(AdditionalOutputs):
+    """An internal FIFO marker, never a user-visible chat event."""
+
+    def __init__(self, epoch: int, completed: asyncio.Future[bool]) -> None:
+        super().__init__()
+        self.epoch = epoch
+        self.completed = completed
 
 
 class _AudioIO:
@@ -103,6 +113,7 @@ class LocalStream:
         """Attach settings immediately, regardless of credential availability."""
         self.handler = handler
         self._robot = robot
+        self._output_tail_delay = configure_native_playback(getattr(robot.media, "audio", None))
         self._stop_event = asyncio.Event()
         self._tasks: list[asyncio.Task[None]] = []
         self._asyncio_loop: asyncio.AbstractEventLoop | None = None
@@ -111,12 +122,14 @@ class LocalStream:
         self._launched = False
         self._media_started = False
         self._play_epoch = 0
+        self._output_changed = asyncio.Event()
         self._flushed_epoch = 0
         self._flush_task: asyncio.Task[None] | None = None
         self._emit_task: asyncio.Task[tuple[int, NDArray[np.int16]] | AdditionalOutputs | None] | None = None
         self._capture_io = _AudioIO("native-audio-capture")
         self._playback_io = _AudioIO("native-audio-playback")
         self.handler._clear_queue = self.clear_audio_queue
+        self.handler._drain_queue = self.drain_audio if self._output_tail_delay else None
         self._settings_app = settings_app
         # instance_path is retained in the public constructor, never a storage root.
         self._init_settings_ui_if_needed()
@@ -198,6 +211,7 @@ class LocalStream:
 
         def cancel() -> None:
             self._stop_event.set()
+            self._output_changed.set()
             if not self._closing and self._runner_task is not None:
                 self._runner_task.cancel()
 
@@ -206,6 +220,35 @@ class LocalStream:
             loop.call_soon_threadsafe(cancel)
         else:
             self._stop_event.set()
+            self._output_changed.set()
+
+    async def drain_audio(self) -> bool:
+        """Fence preceding native pushes and wait a cancellable scheduled tail."""
+        loop = asyncio.get_running_loop()
+        owner = self._asyncio_loop
+        if owner is not None and owner is not loop:
+            if owner.is_closed():
+                return False
+            return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(self.drain_audio(), owner))
+        if self._closing or self._stop_event.is_set():
+            return False
+        epoch = self._play_epoch
+        changed = self._output_changed
+        completed: asyncio.Future[bool] = loop.create_future()
+        self.handler.output_queue.put_nowait(_PlaybackFence(epoch, completed))
+        invalidated: asyncio.Task[bool] = asyncio.create_task(changed.wait())
+        try:
+            watched: set[asyncio.Future[bool]] = {completed, invalidated}
+            done, _ = await asyncio.wait(watched, return_when=asyncio.FIRST_COMPLETED)
+            if invalidated in done or epoch != self._play_epoch or self._stop_event.is_set():
+                return False
+            tail_done, _ = await asyncio.wait({invalidated}, timeout=self._output_tail_delay)
+            return not tail_done and epoch == self._play_epoch and not self._stop_event.is_set() and not self._closing
+        finally:
+            if not completed.done():
+                completed.cancel()
+            invalidated.cancel()
+            await asyncio.gather(invalidated, return_exceptions=True)
 
     def clear_audio_queue(self) -> None:
         """Invalidate PCM now; serialize the native flush after any in-flight push.
@@ -238,6 +281,8 @@ class LocalStream:
                 clear()
             return
         self._play_epoch += 1
+        self._output_changed.set()
+        self._output_changed = asyncio.Event()
         if self._emit_task is not None:
             self._emit_task.cancel()
         if self._flush_task is None or self._flush_task.done():
@@ -254,6 +299,7 @@ class LocalStream:
 
     async def _shutdown_audio(self) -> None:
         """Bound native shutdown without pretending cancellation kills threads."""
+        self._output_changed.set()
         cleanup = asyncio.create_task(self._drain_and_stop_audio(), name="native-audio-shutdown")
         done, _ = await asyncio.wait({cleanup}, timeout=self._IO_SHUTDOWN_TIMEOUT)
         if not done:
@@ -333,6 +379,10 @@ class LocalStream:
                     continue
                 finally:
                     self._emit_task = None
+                if isinstance(output, _PlaybackFence):
+                    if epoch == self._play_epoch == output.epoch and not output.completed.done():
+                        output.completed.set_result(True)
+                    continue
                 if epoch != self._play_epoch or isinstance(output, AdditionalOutputs):
                     continue
                 if isinstance(output, tuple):

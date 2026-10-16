@@ -3,17 +3,78 @@
 from __future__ import annotations
 import json
 import asyncio
+from types import SimpleNamespace
+from typing import cast
 from pathlib import Path
 
 import pytest
 import test_music_lifecycle as lifecycle
+import test_native_audio_responsiveness as native
 
+from reachy_mini import ReachyMini
 import dj_reachy.profiles.dj_reachy.make_song_and_dance as music
 from dj_reachy.config import config
+from dj_reachy.console import LocalStream
+from dj_reachy.openai_realtime import OpenaiRealtimeHandler
 
 
 actor = lifecycle.actor
 real_mp3 = lifecycle.real_mp3
+
+
+@pytest.mark.asyncio
+async def test_saved_replay_completes_through_real_native_fence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, actor: lifecycle.PlaybackActor, real_mp3: Path
+) -> None:
+    """Saved replay keeps its final native pushes and output ownership until drain."""
+    root = tmp_path / "songs"
+    root.mkdir()
+    monkeypatch.setattr(config, "SONGS_DIR", root)
+    (root / "native.mp3").write_bytes(real_mp3.read_bytes())
+    (root / "native.json").write_text(json.dumps({"title": "Native fixture"}))
+    media = native.BlockingMedia("")
+    values = {"latency": 0}
+    mixer = SimpleNamespace(
+        get_factory=lambda: SimpleNamespace(get_name=lambda: "audiomixer"),
+        get_property=lambda name: values[name],
+        set_property=lambda name, value: values.__setitem__(name, value),
+    )
+    media.audio._pipeline = native.native_pipeline(mixer)
+    media.audio.GAP_RESET_NS = 200_000_000
+    handler = OpenaiRealtimeHandler(actor.deps)
+    actor.deps.openai_realtime_handler = handler
+    stream = LocalStream(handler, cast(ReachyMini, SimpleNamespace(media=media)))
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    actual_drain = handler._drain_queue
+    assert actual_drain is not None
+
+    async def drain() -> bool:
+        entered.set()
+        await release.wait()
+        return await actual_drain()
+
+    handler._drain_queue = drain
+    player = asyncio.create_task(stream.play_loop())
+    replay = asyncio.create_task(music.PlaySavedSong()(actor.deps, filename="native.mp3"))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        assert not replay.done()
+        assert handler._mute_output_audio and actor.dancer.running
+        assert media.pushed
+        clears = media.calls.count("flush")
+        release.set()
+        result = await asyncio.wait_for(replay, 2)
+        assert result["status"] == "completed" and result["regenerated"] is False
+        assert media.calls.count("flush") == clears
+        assert not handler._mute_output_audio and not actor.dancer.running
+    finally:
+        release.set()
+        replay.cancel()
+        stream._stop_event.set()
+        player.cancel()
+        await asyncio.gather(replay, player, return_exceptions=True)
+        await stream._shutdown_audio()
 
 
 @pytest.mark.asyncio

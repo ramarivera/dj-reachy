@@ -4,10 +4,12 @@ from __future__ import annotations
 import os
 import shutil
 import asyncio
+import threading
 import subprocess
 from pathlib import Path
 from dataclasses import field, dataclass
 from unittest.mock import MagicMock
+from collections.abc import Callable, Awaitable
 
 import numpy as np
 import pytest
@@ -45,6 +47,7 @@ class PlaybackHandler:
     cleared: list[bool]
     output_queue: asyncio.Queue[object] = field(default_factory=asyncio.Queue)
     last_activity_time: float = 0
+    _drain_queue: Callable[[], Awaitable[bool]] | None = None
 
     def mute_output_audio(self, owner: str) -> None:
         """Acquire the named output mute."""
@@ -116,6 +119,156 @@ def real_mp3(tmp_path_factory: pytest.TempPathFactory) -> Path:
     subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
     assert path.stat().st_size > 1000
     return path
+
+
+@pytest.mark.asyncio
+async def test_natural_eof_waits_for_native_tail_without_flushing(
+    actor: PlaybackActor, real_mp3: Path
+) -> None:
+    """Decoder EOF cannot release ownership or erase queued speaker audio."""
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def drain() -> bool:
+        entered.set()
+        await release.wait()
+        return True
+
+    actor.handler._drain_queue = drain
+    task = asyncio.create_task(music._play_mp3(str(real_mp3), actor.deps))
+    arrived = asyncio.create_task(entered.wait())
+    try:
+        await asyncio.wait({task, arrived}, timeout=5, return_when=asyncio.FIRST_COMPLETED)
+        assert entered.is_set(), "Natural decoder EOF skipped the native completion fence"
+        assert not task.done()
+        assert actor.owners and actor.dancer.running
+        assert not actor.cleared
+        release.set()
+        assert await asyncio.wait_for(task, 1) is False
+        assert not actor.owners and not actor.dancer.running
+        assert not actor.cleared, "Natural completion destroyed the buffered tail"
+    finally:
+        release.set()
+        task.cancel()
+        arrived.cancel()
+        await asyncio.gather(task, arrived, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_stop_during_native_tail_is_stopped_not_completed(
+    actor: PlaybackActor, real_mp3: Path
+) -> None:
+    """Stop invalidates native completion without waiting for its tail deadline."""
+    entered = asyncio.Event()
+
+    async def drain() -> bool:
+        entered.set()
+        while not actor.cleared:
+            await asyncio.sleep(0.005)
+        return False
+
+    actor.handler._drain_queue = drain
+    task = asyncio.create_task(music._play_mp3(str(real_mp3), actor.deps))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        await asyncio.wait_for(music.StopMusic()(actor.deps), 0.5)
+        assert await asyncio.wait_for(task, 0.5) is True, "Interrupted native tail was reported completed"
+        assert actor.cleared and not actor.owners
+        assert music._active_decoder is None
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("final_action", ["stop", "resume"])
+async def test_pause_during_native_tail_retains_owner(
+    actor: PlaybackActor, real_mp3: Path, final_action: str
+) -> None:
+    """An invalidated EOF fence cannot finish a paused owner or erase conversation."""
+    entered = asyncio.Event()
+    old_deadline = asyncio.Event()
+    calls = 0
+
+    async def drain() -> bool:
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            return True
+        entered.set()
+        while not actor.cleared and not old_deadline.is_set():
+            await asyncio.sleep(0.005)
+        return not actor.cleared
+
+    actor.handler._drain_queue = drain
+    task = asyncio.create_task(music._play_mp3(str(real_mp3), actor.deps))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        await music.PauseMusic()(actor.deps)
+        clears = len(actor.cleared)
+        feeds = actor.dancer.feed_count
+        conversation = (24000, np.ones((1, 16), dtype=np.int16))
+        actor.handler.output_queue.put_nowait(conversation)
+        old_deadline.set()
+        await asyncio.sleep(0.08)
+        assert not task.done(), "EOF drain released a still-paused playback owner"
+        assert music._playback_pause is not None and not music._playback_pause.is_set()
+        assert len(actor.cleared) == clears
+        assert actor.handler.output_queue.get_nowait() is conversation
+        if final_action == "stop":
+            await asyncio.wait_for(music.StopMusic()(actor.deps), 0.5)
+            assert await asyncio.wait_for(task, 0.5) is True
+        else:
+            await music.ResumeMusic()(actor.deps)
+            assert await asyncio.wait_for(task, 0.5) is False
+            assert actor.dancer.feed_count == feeds, "Resume revived already-flushed tail PCM"
+        assert not actor.owners
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["task", "event"])
+async def test_cancel_during_native_tail_cannot_touch_replacement(
+    actor: PlaybackActor, real_mp3: Path, mode: str
+) -> None:
+    """Cancellation must not inherit an unbounded output drain or its old deadline."""
+    entered = asyncio.Event()
+    deadline = asyncio.Event()
+    cancel = threading.Event()
+
+    async def drain() -> bool:
+        entered.set()
+        await deadline.wait()
+        return True
+
+    actor.handler._drain_queue = drain
+    task = asyncio.create_task(music._play_mp3(str(real_mp3), actor.deps, cancel))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        if mode == "event":
+            cancel.set()
+            done, _ = await asyncio.wait({task}, timeout=0.3)
+            assert task in done, "Cancellation event was stranded behind native EOF drain"
+            assert await task is True
+        else:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 0.5)
+        assert not actor.owners and music._active_decoder is None
+        actor.handler.mute_output_audio("replacement")
+        clears = len(actor.cleared)
+        conversation = (24000, np.ones((1, 16), dtype=np.int16))
+        actor.handler.output_queue.put_nowait(conversation)
+        deadline.set()
+        await asyncio.sleep(0.03)
+        assert actor.owners == {"replacement"}
+        assert len(actor.cleared) == clears
+        assert actor.handler.output_queue.get_nowait() is conversation
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.asyncio

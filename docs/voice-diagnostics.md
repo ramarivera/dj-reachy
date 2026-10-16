@@ -67,8 +67,29 @@ The speech-motion analysis only consumes its latest 320-sample frame. Keeping te
 
 On the same robot, a 60-second device-free duplex test with the old window produced 2,434 outbound packets and 2,640 playback pushes while its playback queue grew to 273 frames at the last sample. Changing only the analysis-window bound produced 3,000 outbound packets and 3,000 playback pushes with zero playback backlog at every sample. This reproduces a progressive processing failure and verifies its offline repair. It does not establish physical audibility, the full severity of a provider-connected failure, or successful spoken music control. Keep those acceptance gates separate.
 
+## Native streaming playback
+
+A buffered MP3 file and a paced output counter don't establish smooth native playback. A real-speaker run still stuttered while ALSA reported zero dropped buffers. A separate controlled test sent a continuous five-second signal through the full SDK mixer and injected one 250 ms delivery pause. The default scheduling inserted a roughly 250 ms gap. Extending the mixer latency alone still failed because the SDK reset the appsrc timestamp before the new buffering window expired.
+
+`LocalStream` configures its own SDK audio instance with at least 320 ms of live mixer latency and a timestamp-reset window at least 200 ms beyond that latency. Existing wider settings stay intact. Shared SDK files, other applications and device settings aren't changed. This adds output latency; it doesn't prove the actual session's underlying model generation or acoustic speaker quality.
+
+Normal decoder EOF now uses an optional ordered native completion fence. It waits for preceding PCM submissions and the bounded native tail before releasing the song owner. Natural completion doesn't flush that tail. Pause, stop, cancellation and shutdown invalidate the fence without occupying the native worker for a delay. A paused EOF owner remains paused until resume or stop, and an obsolete fence can't affect replacement playback. Gradio retains its existing path without a native fence.
+
+Run the deterministic check in a GStreamer-capable SDK interpreter from the checkout:
+
+```text
+python tools/qualify_native_playback.py --baseline
+python tools/qualify_native_playback.py
+```
+
+The baseline command is expected to fail the continuity assertion. The configured command must preserve the full signal with no interior signal gap of 50 ms or more. Both use synthetic capture and a silent sink; neither opens physical devices or a provider session. This is a software timing regression, not an audible hardware pass.
+
+For physical qualification, verify the real sink factory and device alias, not merely rendered-buffer totals. Preserve the native `.asoundrc` when isolating HOME, or the SDK may select PulseAudio's null sink. Drain real native capture before substituting synthetic input, discarding room samples in memory without forwarding or saving them. Measure sink signal timing from before the first greeting, and distinguish incoming receive gaps, native-write duration and event-loop delays. Don't serialize an ever-growing signal history in periodic progress snapshots.
+
+Pause keeps the existing discard-read-ahead behavior rather than seeking the decoder backwards, so exact sample-position resume isn't claimed. Motion offsets still follow decoded PCM rather than the delayed hardware presentation clock; exact physical beat-to-motion alignment remains unqualified. Audio-only tests with intercepted movement don't qualify it.
+
 ## Qualification limits
 
 Offline tests exercise synthetic stereo frames through the real native capture loop, handler selection/resampling/encoding, subscription append and microphone track. Loopback WebRTC tests check actual RTP statistics and cleanup. Privacy, rotation, rate limiting and owned-resource closure are tested separately.
 
-The first failed physical session lacked these boundary logs. A later instrumented run established nonzero capture on both channels, nonzero selected/encoded/track audio and outbound RTP progress, with late generated output but no usable response reported by the user. Do not present that as a successful physical conversation or a proven model-version problem. A new microphone/speaker test or subscription session requires fresh authorization and a bounded test window; do not automatically reconnect to gather more evidence.
+The first failed physical session lacked these boundary logs. A later instrumented run established nonzero capture on both channels, nonzero selected/encoded/track audio and outbound RTP progress, with late generated output but no usable response reported by the user. Do not present that as a successful physical conversation or a proven model-version problem. Use the standing per-test authorization where it applies, and keep each trial bounded with its own request ledger. Operations outside those conditions require approval. Never reuse an exhausted allowance or automatically reconnect beyond the trial cap.
