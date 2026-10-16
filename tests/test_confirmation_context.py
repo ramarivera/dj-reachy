@@ -81,8 +81,9 @@ async def confirmation(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Confirm
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("initial_delegation", [False, True], ids=["first-delegation-after-confirm", "prior-clarification"])
+@pytest.mark.parametrize("canonical_has_task", [True, False], ids=["rich-canonical", "confirmation-only-canonical"])
 async def test_confirmation_keeps_original_task_available_to_planner(
-    confirmation: ConfirmationHarness, initial_delegation: bool
+    confirmation: ConfirmationHarness, initial_delegation: bool, canonical_has_task: bool
 ) -> None:
     """A complete canonical task must not disappear behind a fresh confirmation.
 
@@ -98,10 +99,11 @@ async def test_confirmation_keeps_original_task_available_to_planner(
         "role": "assistant", "transcript": "Shall I make that song?",
     }})
     await confirmation.user("go ahead")
-    event = await confirmation.delegate("confirmed-task", CANONICAL)
+    canonical = CANONICAL if canonical_has_task else "go ahead"
+    event = await confirmation.delegate("confirmed-task", canonical)
     await confirmation.drain()
     assert event.transcript_context == "go ahead"
-    assert event.item["content"][0]["text"] == CANONICAL
+    assert event.item["content"][0]["text"] == canonical
     assert len(confirmation.requests) == (2 if initial_delegation else 1)
     request = confirmation.requests[-1]
     print("SYNTHETIC_PLANNER_INPUT=" + json.dumps(request, sort_keys=True))
@@ -110,9 +112,11 @@ async def test_confirmation_keeps_original_task_available_to_planner(
     from dj_reachy.voice_planner import _validate_history
 
     assert _validate_history(request["history"]) == request["history"]
-    assert len(request["history"]) == 1
-    context = request["history"][0]
-    assert context["type"] == "message" and context["role"] == "assistant"
+    from dj_reachy.voice_planner import DELEGATION_CONTEXT_PREFIX
+
+    assert 1 <= len(request["history"]) <= 2
+    assert all(item["type"] == "message" and item["role"] == "assistant" for item in request["history"])
+    context = next(item for item in request["history"] if item["content"].startswith(DELEGATION_CONTEXT_PREFIX))
     assert "not a user transcript" in context["content"]
     assert "take precedence" in context["content"]
     available = json.dumps({"transcript": request["transcript"], "history": request["history"]})
@@ -191,8 +195,59 @@ async def test_confirmation_context_survives_real_host_planner_encoding(
     assert payloads[0]["tool_choice"] == "auto"
     assert payloads[0]["input"][0]["role"] == "assistant"
     assert ORIGINAL in payloads[0]["input"][0]["content"]
-    assert payloads[0]["input"][1]["role"] == "user"
-    assert payloads[0]["input"][1]["content"][0]["text"] == "go ahead"
+    wire = payloads[0]["input"]
+    current = next(i for i, item in enumerate(wire) if item.get("role") == "user")
+    assert current == len(confirmation.requests[-1]["history"]) - (2 if with_results else 0)
+    assert all(item["role"] == "assistant" for item in wire[:current])
+    assert wire[current]["content"][0]["text"] == "go ahead"
     if with_results:
-        assert [item["type"] for item in payloads[0]["input"][2:]] == ["function_call", "function_call_output"]
-        assert payloads[0]["input"][2:]==confirmation.requests[-1]["history"][1:]
+        assert [item["type"] for item in wire[current+1:]] == ["function_call", "function_call_output"]
+        assert wire[current+1:] == confirmation.requests[-1]["history"][current:]
+
+@pytest.mark.asyncio
+async def test_executed_turn_context_clears_without_erasing_newer_speech(
+    confirmation: ConfirmationHarness, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An admitted app command consumes its context, not speech arriving during IO."""
+    import dj_reachy.openai_realtime as realtime
+
+    planning = asyncio.Event()
+    release = asyncio.Event()
+    newer = "Make a 15-second lullaby about the moon."
+    dispatched: list[str] = []
+
+    async def dispatch(name: str, arguments: str, deps: ToolDependencies) -> dict[str, str]:
+        dispatched.append(name)
+        return {"status": "paused"}
+
+    async def broker(body: dict[str, Any], *, operation: str = "session") -> dict[str, Any]:
+        assert operation == "plan"
+        confirmation.requests.append(json.loads(json.dumps(body)))
+        if len(confirmation.requests) == 1:
+            planning.set()
+            await release.wait()
+            return {
+                "calls": [{"call_id": "fixture-pause", "name": "pause_music", "arguments": {}}],
+                "output": [{"type": "function_call", "call_id": "fixture-pause", "name": "pause_music", "arguments": "{}"}],
+                "text": "",
+            }
+        return {"calls": [], "output": [], "text": "Synthetic final reply; no additional actions."}
+
+    monkeypatch.setattr(realtime, "dispatch_tool_call", dispatch)
+    monkeypatch.setattr(subscription, "broker_request", broker)
+    await confirmation.user(ORIGINAL)
+    await confirmation.user("go ahead")
+    await confirmation.delegate("old-request", "go ahead")
+    await asyncio.wait_for(planning.wait(), timeout=1)
+    await confirmation.user(newer)
+    release.set()
+    await confirmation.drain()
+    assert dispatched == ["pause_music"]
+    await confirmation.user("go ahead")
+    await confirmation.delegate("new-request", "go ahead")
+    await confirmation.drain()
+    request = confirmation.requests[-1]
+    assert request["transcript"] == "go ahead"
+    context = json.dumps(request["history"])
+    assert newer in context, "Earlier command completion must preserve newer pending speech"
+    assert ORIGINAL not in context, "Executed request context must not be reused as a pending request"

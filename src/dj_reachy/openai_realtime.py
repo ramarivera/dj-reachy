@@ -300,13 +300,24 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
         correlation = turn if transcript and isinstance(turn, int) else f"delegation:{identity}"
         control_task = self._control_for_turn(correlation, control) if control else None
         task_context = request if transcript and control is None else ""
+        prior_value = getattr(event, "prior_user_context", ())
+        prior_user_context: tuple[str, ...] = ()
+        if (transcript and control is None and isinstance(prior_value, tuple)
+                and len(prior_value) <= 4
+                and all(isinstance(item, str) and item for item in prior_value)
+                and sum(len(item.encode("utf-8")) for item in prior_value) <= 8192):
+            prior_user_context = prior_value
+        context_turn_id = turn if isinstance(turn, int) else None
         if not transcript:
             transcript = "Live model delegation request (not a verbatim user transcript):\n" + request
         connection, epoch = self.connection, self._work_epoch
 
         async def run() -> None:
             if self._current(connection, epoch):
-                await self._run_subscription_delegation(identity, transcript, control_task, task_context=task_context)
+                await self._run_subscription_delegation(
+                    identity, transcript, control_task, task_context=task_context,
+                    prior_user_context=prior_user_context, context_turn_id=context_turn_id,
+                )
 
         task = asyncio.create_task(run(), name=f"delegation-{identity}")
         self._subscription_tasks[identity] = task
@@ -316,7 +327,8 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
         task.add_done_callback(self._work_tasks.discard)
 
     async def _run_subscription_delegation(
-        self, identity: str, transcript: str, control_task: asyncio.Task[dict[str, Any]] | None = None, *, task_context: str = ""
+        self, identity: str, transcript: str, control_task: asyncio.Task[dict[str, Any]] | None = None, *,
+        task_context: str = "", prior_user_context: tuple[str, ...] = (), context_turn_id: int | None = None,
     ) -> None:
         connection, epoch = self.connection, self._work_epoch
         if connection is None:
@@ -339,9 +351,14 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
             await connection.send_context(
                 "The app is working on the current request. No result yet.", "commentary", identity
             )
-            from dj_reachy.voice_planner import DELEGATION_CONTEXT_PREFIX
+            from dj_reachy.voice_planner import DELEGATION_CONTEXT_PREFIX, PENDING_USER_CONTEXT_PREFIX
 
             history: list[dict[str, Any]] = []
+            if prior_user_context:
+                history.append({
+                    "type": "message", "role": "assistant",
+                    "content": PENDING_USER_CONTEXT_PREFIX + json.dumps(prior_user_context, ensure_ascii=False),
+                })
             if task_context:
                 history.append({
                     "type": "message", "role": "assistant",
@@ -380,6 +397,9 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
                     if not isinstance(call_id, str) or call_id in seen_calls or len(seen_calls) >= MAX_CALLS:
                         raise ValueError("Duplicate or excessive app planner calls")
                     seen_calls.add(call_id)
+                    clear_context = getattr(connection, "clear_pending_user_context", None)
+                    if context_turn_id is not None and callable(clear_context):
+                        clear_context(through_turn=context_turn_id)
                     result = await self._execute(name, args, connection, epoch)
                     if name == "stop_music":
                         epoch = self._work_epoch

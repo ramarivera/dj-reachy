@@ -10,6 +10,7 @@ import re
 import json
 import base64
 import asyncio
+from time import monotonic
 from types import SimpleNamespace
 from typing import Any, Callable, Awaitable
 from collections import deque
@@ -236,6 +237,11 @@ class SubscriptionRealtimeConnection:
         self._stats_task: asyncio.Task[None] | None = None
         self._closed = False
         self._user_transcript = ""
+        self._pending_user_context: deque[tuple[int, float, str]] = deque()
+        self._context_turn = -1
+        self._context_text: str | None = ""
+        self._context_started = 0.0
+        self._context_cleared_turn = -1
         self._current_input = ""
         self._turn_id = 0
         self._consumed_turn = -1
@@ -432,6 +438,7 @@ class SubscriptionRealtimeConnection:
         if self._closed:
             return
         self._closed = True
+        self.clear_pending_user_context()
         try:
             if self._pc is not None:
                 try:
@@ -473,6 +480,8 @@ class SubscriptionRealtimeConnection:
 
     async def __anext__(self) -> Any:
         """Attach only the current unconsumed user turn to a delegation."""
+        if self._closed:
+            raise StopAsyncIteration
         while self._events.empty() and self._audio_events.empty():
             if self._closed:
                 raise StopAsyncIteration
@@ -481,8 +490,13 @@ class SubscriptionRealtimeConnection:
         event = self._events.get_nowait() if not self._events.empty() else self._audio_events.get_nowait()
         if event is None:
             raise StopAsyncIteration
+        self._prune_pending_user_context()
+        # Provider fields cannot impersonate this locally derived carrier.
+        if hasattr(event, "prior_user_context"):
+            del event.prior_user_context
         kind = event.type
         if kind == "session.closed":
+            self.clear_pending_user_context()
             raise ConnectionError("Subscription Live session closed.")
         if kind == "input_transcript.added":
             if not self._current_input:
@@ -498,6 +512,16 @@ class SubscriptionRealtimeConnection:
                 self._user_transcript = turn["transcript"][-6000:]
                 self._current_input = ""
                 self._awaiting_final = False
+        if kind == "input_transcript.added" or (
+            kind == "turn.done"
+            and isinstance(getattr(event, "turn", None), dict)
+            and event.turn.get("role") == "user"
+            and isinstance(event.turn.get("transcript"), str)
+        ):
+            self._remember_user_context(
+                self._transcript(event) if kind == "input_transcript.added" else event.turn["transcript"],
+                append=kind == "input_transcript.added",
+            )
         elif kind == "delegation.created":
             event.transcript_context = ""
             decoded = subscription_delegation(getattr(event, "item", None))
@@ -509,10 +533,53 @@ class SubscriptionRealtimeConnection:
                         self._seen_delegations.add(identity)
                         if transcript.strip():
                             event.transcript_context = transcript
+                            event.prior_user_context = tuple(text for _, _, text in self._pending_user_context)
                             self._consumed_turn = self._turn_id
                             self._current_input = ""
         event.turn_id = self._turn_id
         return event
+
+    def clear_pending_user_context(self, through_turn: int | None = None) -> None:
+        """Forget executed speech without erasing newer turns received during app awaits."""
+        through_turn = self._turn_id if through_turn is None else through_turn
+        self._pending_user_context = deque(entry for entry in self._pending_user_context if entry[0] > through_turn)
+        if self._context_turn <= through_turn:
+            self._context_text = None
+        self._context_cleared_turn = max(self._context_cleared_turn, through_turn)
+
+    def _prune_pending_user_context(self) -> None:
+        now = monotonic()
+        while self._pending_user_context and (
+            now - self._pending_user_context[0][1] > 90
+            or len(self._pending_user_context) > 4
+            or sum(len(text.encode("utf-8")) for _, _, text in self._pending_user_context) > 8192
+        ):
+            self._pending_user_context.popleft()
+        if now - self._context_started > 90:
+            self._context_text = None
+
+    def _remember_user_context(self, text: str, *, append: bool) -> None:
+        if self._context_turn != self._turn_id:
+            if self._context_text and self._context_text.strip():
+                self._pending_user_context.append((self._context_turn, self._context_started, self._context_text))
+            self._context_turn = self._turn_id
+            self._context_started = monotonic()
+            self._context_text = ""
+        if fast_control(self._user_transcript) == "stop_music":
+            self.clear_pending_user_context()
+        if self._turn_id <= self._context_cleared_turn:
+            return
+        if not append:
+            self._context_text = text
+        elif self._context_text is not None:
+            self._context_text += text
+        if self._context_text is not None:
+            try:
+                if len(self._context_text.encode("utf-8")) > 8192:
+                    self._context_text = None
+            except UnicodeError:
+                self._context_text = None
+        self._prune_pending_user_context()
 
     @staticmethod
     def _transcript(event: Any) -> str:
