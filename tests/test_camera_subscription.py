@@ -19,6 +19,15 @@ def test_camera_is_exposed_in_both_dj_registries() -> None:
     assert "camera" in profile.read_text().splitlines()
 
 
+def test_live_frontend_knows_camera_and_background_generation() -> None:
+    """The Live frontend must delegate supported vision instead of refusing it."""
+    from dj_reachy.subscription_broker import LIVE_INSTRUCTIONS
+
+    text = LIVE_INSTRUCTIONS.lower()
+    assert "camera" in text and "delegate" in text
+    assert "continue" in text and "generat" in text
+
+
 def test_subscription_camera_result_is_a_typed_image_not_base64_text(monkeypatch: pytest.MonkeyPatch) -> None:
     """Inspect the exact Responses payload using a synthetic JPEG and mock SSE."""
     import base64
