@@ -499,7 +499,8 @@ class SubscriptionRealtimeConnection:
             self.clear_pending_user_context()
             raise ConnectionError("Subscription Live session closed.")
         if kind == "input_transcript.added":
-            if not self._current_input:
+            # Delegation consumption clears the buffer, not the still-open user turn.
+            if not self._awaiting_final:
                 self._turn_id += 1
                 self._awaiting_final = True
             self._current_input = (self._current_input + self._transcript(event))[-6000:]

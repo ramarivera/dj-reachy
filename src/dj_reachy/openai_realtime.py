@@ -87,7 +87,11 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
         return OpenaiRealtimeHandler(self.deps, self.gradio_mode, self.instance_path)
 
     def mute_output_audio(self, owner: str = "external") -> None:
-        """Mute assistant PCM for exactly one playback owner."""
+        """Fence prior PCM and filter history once per independent playback owner."""
+        if self._audio_mute_owner != owner:
+            clear = getattr(self, "_clear_queue", None)
+            if callable(clear):
+                clear()
         self._audio_mute_owner = owner
         self._mute_output_audio = True
 
