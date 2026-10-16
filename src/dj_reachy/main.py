@@ -273,6 +273,11 @@ class ReachyMiniConversationApp(ReachyMiniApp):  # type: ignore[misc]
         if args.no_camera or args.settings_only:
             self.request_media_backend = "no_media"
         super().__init__(running_on_wireless=running_on_wireless)
+        if not (args.no_camera or args.settings_only) and getattr(self, "daemon_on_localhost", False):
+            # SDK 1.12's default can choose remote WebRTC on the wireless robot.
+            # A locally managed app owns native camera/audio, not a second peer
+            # connection to an optional signalling service.
+            self.media_backend = "gstreamer"
 
     def run(self, reachy_mini: ReachyMini, stop_event: threading.Event) -> None:
         """Use SDK-owned serving and user-owned configuration in managed mode."""
