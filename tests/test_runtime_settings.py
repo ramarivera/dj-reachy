@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from dj_reachy.runtime_settings import RuntimeSettingsStore
+from dj_reachy_remix.runtime_settings import RuntimeSettingsStore
 
 
 def test_runtime_settings_persist_separate_validated_groups_atomically(tmp_path: Path) -> None:
@@ -39,13 +39,13 @@ def test_http_updates_validate_shapes_and_preserve_state(tmp_path: Path) -> None
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
-    from dj_reachy.runtime_settings import register_runtime_settings_routes
+    from dj_reachy_remix.runtime_settings import register_runtime_settings_routes
 
     path = tmp_path / "settings.json"
     app = FastAPI()
     register_runtime_settings_routes(app, path)
     with TestClient(app) as client:
-        response = client.put("/api/dj-reachy/settings", json={"music": {"duration_ms": 10000}})
+        response = client.put("/api/dj-reachy-remix/settings", json={"music": {"duration_ms": 10000}})
         assert response.status_code == 200, response.text
         assert response.json()["music"]["duration_ms"] == 10000
         before = path.read_bytes()
@@ -53,11 +53,11 @@ def test_http_updates_validate_shapes_and_preserve_state(tmp_path: Path) -> None
         for invalid in ([], {"music": []}, {"music": {"model_id": []}},
                         {"voice": {"backend": {"nested": True}}}, {"motion": {"intensity": True}},
                         {"voice": {"token": "fixture-secret"}}, {"extra": {}}):
-            response = client.put("/api/dj-reachy/settings", json=invalid)
+            response = client.put("/api/dj-reachy-remix/settings", json=invalid)
             assert response.status_code == 400, response.text
             assert "fixture-secret" not in response.text
             assert path.read_bytes() == before
-        assert client.put("/api/dj-reachy/settings", content="{").status_code == 400
+        assert client.put("/api/dj-reachy-remix/settings", content="{").status_code == 400
 
 
 def test_backend_switch_resets_incompatible_defaults_and_rejects_cross_billing(tmp_path: Path) -> None:
@@ -79,8 +79,8 @@ def test_persona_reload_keeps_paid_confirmation_and_separates_languages(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Reload persona additions without dropping the paid-generation policy."""
-    from dj_reachy.config import config
-    from dj_reachy.prompts import get_session_voice, get_session_instructions
+    from dj_reachy_remix.config import config
+    from dj_reachy_remix.prompts import get_session_voice, get_session_instructions
     monkeypatch.setattr(config, "APP_HOME", tmp_path)
     monkeypatch.setattr(config, "VOICE_NAME", "cedar", raising=False)
     monkeypatch.setattr(config, "CONVERSATION_LANGUAGE", "Spanish", raising=False)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from dj_reachy.profiles.dj_reachy.make_song_and_dance import build_music_payload
+from dj_reachy_remix.profiles.dj_reachy.make_song_and_dance import build_music_payload
 
 
 ALLOWED_BODY_FIELDS = {

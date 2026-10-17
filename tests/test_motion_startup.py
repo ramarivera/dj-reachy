@@ -5,7 +5,7 @@ import pytest
 
 from reachy_mini import ReachyMini
 from reachy_mini.reachy_mini import SLEEP_HEAD_POSE
-import dj_reachy.main as main
+import dj_reachy_remix.main as main
 
 
 @pytest.mark.parametrize("sleeping", [True, False])

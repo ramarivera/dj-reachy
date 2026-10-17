@@ -23,13 +23,13 @@
       "source_url": "https://huggingface.co/spaces/mzurki/dj-reachy/resolve/6dc20058f403c25a3f3f51778a466bc2945efd1f/docs/assets/reachy_mini_dance.gif"
     },
     {
-      "path": "src/dj_reachy/images/reachymini_avatar.png",
+      "path": "src/dj_reachy_remix/images/reachymini_avatar.png",
       "bytes": 1228716,
       "sha256": "5a63ac8802ff3542f01292c431c5278296880d74cd3580d219fcf4827bc235f9",
       "source_url": "https://huggingface.co/spaces/mzurki/dj-reachy/resolve/6dc20058f403c25a3f3f51778a466bc2945efd1f/src/dj_reachy/images/reachymini_avatar.png"
     },
     {
-      "path": "src/dj_reachy/images/user_avatar.png",
+      "path": "src/dj_reachy_remix/images/user_avatar.png",
       "bytes": 1111878,
       "sha256": "e97ca125a86bacdaa41c8dca88abd9ca746fd5c9391eda24249c012432b0219b",
       "source_url": "https://huggingface.co/spaces/mzurki/dj-reachy/resolve/6dc20058f403c25a3f3f51778a466bc2945efd1f/src/dj_reachy/images/user_avatar.png"

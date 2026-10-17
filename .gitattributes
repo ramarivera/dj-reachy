@@ -45,5 +45,5 @@
 docs/assets/conversation_app_arch.svg -filter -diff -merge -text
 docs/assets/dj-reachy.mp4 -filter -diff -merge -text
 docs/assets/reachy_mini_dance.gif -filter -diff -merge -text
-src/dj_reachy/images/reachymini_avatar.png -filter -diff -merge -text
-src/dj_reachy/images/user_avatar.png -filter -diff -merge -text
+src/dj_reachy_remix/images/reachymini_avatar.png -filter -diff -merge -text
+src/dj_reachy_remix/images/user_avatar.png -filter -diff -merge -text

@@ -6,7 +6,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from dj_reachy.console import LocalStream
+from dj_reachy_remix.console import LocalStream
 
 
 @pytest.mark.parametrize("method", ["clear_player", "clear_output_buffer"])

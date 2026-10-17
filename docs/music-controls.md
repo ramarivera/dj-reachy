@@ -7,8 +7,8 @@ Music uses ElevenLabs `POST /v1/music`, independently of conversational speech. 
 Use the existing entry point when the integration owner has authorized app and hardware startup:
 
 ```nu
-$env.DJ_REACHY_HOME = ($env.HOME | path join ".local/share/dj-reachy")
-dj-reachy --gradio --no-camera
+$env.DJ_REACHY_REMIX_HOME = ($env.HOME | path join ".local/share/dj-reachy-remix")
+dj-reachy-remix --gradio --no-camera
 ```
 
 This command starts the existing app, not an offline music simulator. It wasn't run against a robot in this implementation lane. `mpg123` must be installed for playback. The installed OpenAI dependency already supplies `httpx`; no package installation or dependency change is needed for cancellable generation.
@@ -104,7 +104,7 @@ The shared interpreter is read-only at `../venv`. The lane's isolated runners an
 ../venv/bin/python ../sol61-lanes/music/run.py music-smoke python ../sol61-lanes/music/smoke_music.py
 ```
 
-`strict_run.py` assigns owned HOME, DJ_REACHY_HOME, CODEX_HOME, HERMES_HOME, all XDG roots including RUNTIME_DIR, TMPDIR, HF_HOME and caches. It strips inherited credentials, disables Hugging Face networking and Gradio analytics, and records the exact command and process exit code through pytest shutdown. Add `-X tracemalloc=15` before `-m pytest` to trace resource allocations. Passing assertions followed by a teardown failure aren't a successful gate.
+`strict_run.py` assigns owned HOME, DJ_REACHY_REMIX_HOME, CODEX_HOME, HERMES_HOME, all XDG roots including RUNTIME_DIR, TMPDIR, HF_HOME and caches. It strips inherited credentials, disables Hugging Face networking and Gradio analytics, and records the exact command and process exit code through pytest shutdown. Add `-X tracemalloc=15` before `-m pytest` to trace resource allocations. Passing assertions followed by a teardown failure aren't a successful gate.
 
 `tests/conftest.py` owns an isolated event-loop policy and its idle restore loop. Pytest-asyncio's runner otherwise implicitly creates that idle loop while saving the ambient policy; a later synchronous `asyncio.run()` can detach it. The fixture closes only the restore loop it created, then restores the previous policy. The subprocess regression checks every recorded real loop's `is_closed()` state after pytest teardown, independently of GC timing.
 

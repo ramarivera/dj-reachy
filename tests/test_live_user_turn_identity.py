@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from dj_reachy.subscription_voice import SubscriptionRealtimeAdapter, SubscriptionRealtimeConnection
+from dj_reachy_remix.subscription_voice import SubscriptionRealtimeAdapter, SubscriptionRealtimeConnection
 
 
 async def emit(connection: SubscriptionRealtimeConnection, kind: str, **fields: object) -> SimpleNamespace:

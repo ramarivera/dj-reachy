@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 from numpy.typing import NDArray
 
-from dj_reachy.audio.streaming_pcm import StreamingPCMConverter
+from dj_reachy_remix.audio.streaming_pcm import StreamingPCMConverter
 
 
 def tone(rate: int, samples: int) -> NDArray[np.float32]:

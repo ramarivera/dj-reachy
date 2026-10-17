@@ -5,8 +5,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-import dj_reachy.profiles.dj_reachy.make_song_and_dance as music
-from dj_reachy.audio.music_dancer import MusicDancer
+import dj_reachy_remix.profiles.dj_reachy.make_song_and_dance as music
+from dj_reachy_remix.audio.music_dancer import MusicDancer
 
 
 def test_zero_music_intensity_really_disables_offsets(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -29,7 +29,7 @@ def test_zero_music_intensity_really_disables_offsets(monkeypatch: pytest.Monkey
 
 def test_stereo_analysis_preserves_fractional_channel_mean_without_mutating_pcm() -> None:
     """Keep the existing floating downmix instead of quantizing back to int16."""
-    from dj_reachy.audio.music_dancer import AudioAnalyzer
+    from dj_reachy_remix.audio.music_dancer import AudioAnalyzer
 
     stereo = np.array([[0, 2, 4, 6], [1, 3, 5, 7]], dtype=np.int16)
     before = stereo.copy()

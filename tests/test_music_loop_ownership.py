@@ -43,7 +43,7 @@ def test_async_then_sync_music_closes_pytest_restore_loop(tmp_path: Path) -> Non
     }
     for name in (
         "HOME",
-        "DJ_REACHY_HOME",
+        "DJ_REACHY_REMIX_HOME",
         "CODEX_HOME",
         "HERMES_HOME",
         "XDG_CONFIG_HOME",

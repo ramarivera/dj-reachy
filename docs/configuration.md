@@ -2,7 +2,7 @@
 
 ## User-owned storage
 
-`DJ_REACHY_HOME` is the explicit storage root. Otherwise the app uses `$XDG_DATA_HOME/dj-reachy`, falling back to `~/.local/share/dj-reachy`. The root contains:
+`DJ_REACHY_REMIX_HOME` is the explicit storage root. Otherwise the app uses `$XDG_DATA_HOME/dj-reachy-remix`, falling back to `~/.local/share/dj-reachy-remix`. The root contains:
 
 - `settings.json`, validated nonsecret `voice`, `music` and `motion` groups.
 - `instructions.md`, user personality additions loaded on each new voice connection.
@@ -14,12 +14,12 @@ Settings and instructions also use private same-directory temporary files, fsync
 Choose a separate root in Nushell:
 
 ```nu
-with-env {DJ_REACHY_HOME: ($env.HOME | path join ".local" "share" "dj-reachy") } {
-  dj-reachy --settings-only
+with-env {DJ_REACHY_REMIX_HOME: ($env.HOME | path join ".local" "share" "dj-reachy-remix") } {
+  dj-reachy-remix --settings-only
 }
 ```
 
-`DJ_REACHY_UI_HOST` defaults to `127.0.0.1`; `DJ_REACHY_UI_PORT` defaults to `7860`. The SDK-managed app retains its SDK server address. The control API can modify settings, credentials and playback. Don't expose it to an untrusted network. Use a trusted local connection or an authenticated reverse proxy; the app doesn't provide user accounts.
+`DJ_REACHY_REMIX_UI_HOST` defaults to `127.0.0.1`; `DJ_REACHY_REMIX_UI_PORT` defaults to `7860`. The SDK-managed app retains its SDK server address. The control API can modify settings, credentials and playback. Don't expose it to an untrusted network. Use a trusted local connection or an authenticated reverse proxy; the app doesn't provide user accounts.
 
 ## Conversation and billing
 
@@ -31,7 +31,7 @@ The default voice group is:
 
 Select `api_key` explicitly in the UI or with `--voice-backend api_key`. A backend-only change resets incompatible model/voice defaults to `gpt-realtime` and `cedar`. API-key mode rejects subscription models and `cove`; it never inherits them accidentally. Selecting subscription resets to its own defaults and never consumes an OpenAI API key as a fallback.
 
-Subscription broker URL and scoped token remain environment-only through `DJ_REACHY_SUBSCRIPTION_BROKER_URL` and `DJ_REACHY_SUBSCRIPTION_BROKER_TOKEN`. The voice implementation owns broker/credential-source setup and qualification. These values aren't settings JSON fields or public status values. The consumer ChatGPT Live contract and account access aren't established by this settings UI.
+Subscription broker URL and scoped token remain environment-only through `DJ_REACHY_REMIX_SUBSCRIPTION_BROKER_URL` and `DJ_REACHY_REMIX_SUBSCRIPTION_BROKER_TOKEN`. The voice implementation owns broker/credential-source setup and qualification. These values aren't settings JSON fields or public status values. The consumer ChatGPT Live contract and account access aren't established by this settings UI.
 
 The voice model, conversation voice, conversation language, and personality instructions apply on the next connection. Save, disconnect browser voice, and reconnect it at `/voice`. Headless sessions require an app restart to reconnect. This is deliberate; saving a form doesn't automatically create a billable session. The API response for saved instructions includes `reconnect_required: true`.
 
@@ -64,25 +64,25 @@ The same endpoints exist in the app-manager, standalone headless and Gradio mode
 
 ```nu
 # Nonsecret settings only. Does not start a provider session.
-curl --fail-with-body --request PUT http://127.0.0.1:7860/api/dj-reachy/settings --header 'Content-Type: application/json' --data '{"voice":{"backend":"api_key"},"music":{"duration_ms":10000,"language":"Japanese"},"motion":{"style":"smooth","intensity":0.12}}'
+curl --fail-with-body --request PUT http://127.0.0.1:7860/api/dj-reachy-remix/settings --header 'Content-Type: application/json' --data '{"voice":{"backend":"api_key"},"music":{"duration_ms":10000,"language":"Japanese"},"motion":{"style":"smooth","intensity":0.12}}'
 
-curl --fail-with-body http://127.0.0.1:7860/api/dj-reachy/settings
-curl --fail-with-body http://127.0.0.1:7860/api/dj-reachy/status
+curl --fail-with-body http://127.0.0.1:7860/api/dj-reachy-remix/settings
+curl --fail-with-body http://127.0.0.1:7860/api/dj-reachy-remix/status
 ```
 
 | Method and path | Behavior |
 | --- | --- |
 | `GET /` | Wheel-packaged control panel |
 | `GET /voice` | Browser conversation, only when launched with `--gradio` |
-| `GET/PUT /api/dj-reachy/settings` | Read or atomically update the three nonsecret groups |
-| `GET/PUT /api/dj-reachy/instructions` | Read or save `{"instructions":"..."}`; reconnect required |
-| `POST /api/dj-reachy/credentials` | Persist `{"provider":"openai" or "elevenlabs","key":"..."}`; never returns the value |
-| `GET /api/dj-reachy/status` | Selected backend/billing, configured-key booleans and explicitly unverified provider access |
+| `GET/PUT /api/dj-reachy-remix/settings` | Read or atomically update the three nonsecret groups |
+| `GET/PUT /api/dj-reachy-remix/instructions` | Read or save `{"instructions":"..."}`; reconnect required |
+| `POST /api/dj-reachy-remix/credentials` | Persist `{"provider":"openai" or "elevenlabs","key":"..."}`; never returns the value |
+| `GET /api/dj-reachy-remix/status` | Selected backend/billing, configured-key booleans and explicitly unverified provider access |
 | `GET /songs` | Regular saved-track filenames, titles and sizes |
 | `GET/DELETE /songs/{filename}` | Read or delete one owned regular MP3 track |
-| `POST /api/dj-reachy/music/replay` | `{"filename":"exact-name.mp3"}`, no regeneration |
-| `POST /api/dj-reachy/music/pause`, `/resume`, `/stop` | Empty object, existing tool call |
-| `POST /api/dj-reachy/music/generate` | Existing tool parameters, with `music_length_ms`, and exactly one prompt or composition_plan |
+| `POST /api/dj-reachy-remix/music/replay` | `{"filename":"exact-name.mp3"}`, no regeneration |
+| `POST /api/dj-reachy-remix/music/pause`, `/resume`, `/stop` | Empty object, existing tool call |
+| `POST /api/dj-reachy-remix/music/generate` | Existing tool parameters, with `music_length_ms`, and exactly one prompt or composition_plan |
 
 Playback returns 409 if no audio session is available. The settings-only mode never silently creates a provider connection to satisfy a playback request. Status says `unverified` even when a key is configured; it isn't a provider health probe.
 

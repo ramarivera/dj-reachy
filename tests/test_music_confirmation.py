@@ -10,7 +10,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from dj_reachy.runtime_settings import DEFAULT_SETTINGS, validate_generation_request
+from dj_reachy_remix.runtime_settings import DEFAULT_SETTINGS, validate_generation_request
 
 
 @pytest.fixture(autouse=True)
@@ -28,8 +28,8 @@ def offline_only(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_prepare_freezes_expanded_request_without_activating() -> None:
     """Build a detached immutable request without interpreting consent or doing IO."""
-    assert importlib.util.find_spec("dj_reachy.music_confirmation") is not None
-    from dj_reachy.music_confirmation import PendingMusicConfirmation
+    assert importlib.util.find_spec("dj_reachy_remix.music_confirmation") is not None
+    from dj_reachy_remix.music_confirmation import PendingMusicConfirmation
 
     settings = copy.deepcopy(DEFAULT_SETTINGS)
     settings["music"].update(positive_styles=["jazz"], lyrics="private lyrics")
@@ -61,7 +61,7 @@ def test_prepare_freezes_expanded_request_without_activating() -> None:
 
 def test_pending_payload_is_exact_bounded_detached_rpc_data() -> None:
     """Export only local metadata and enforce UTF8 byte budgets."""
-    from dj_reachy.music_confirmation import PendingMusicConfirmation
+    from dj_reachy_remix.music_confirmation import PendingMusicConfirmation
 
     draft = PendingMusicConfirmation().prepare(
         {"prompt": "jazz"}, copy.deepcopy(DEFAULT_SETTINGS), original_turn=1, original_user_text="mi canción"
@@ -90,7 +90,7 @@ def test_pending_payload_is_exact_bounded_detached_rpc_data() -> None:
 @pytest.mark.parametrize("reply", ["Haz exactamente esa canción", "それでお願いします", "no fixed approval phrase"])
 def test_offered_request_consumes_once_only_on_injected_approval(reply: str) -> None:
     """A real fresh ticket, not any particular word, grants one frozen execution."""
-    from dj_reachy.music_confirmation import PendingMusicConfirmation
+    from dj_reachy_remix.music_confirmation import PendingMusicConfirmation
 
     settings = copy.deepcopy(DEFAULT_SETTINGS)
     gate = PendingMusicConfirmation()
@@ -153,7 +153,7 @@ def test_offered_request_consumes_once_only_on_injected_approval(reply: str) -> 
 )
 def test_prepare_rejects_invalid_authority_or_unpresentable_request(options: Any, turn: Any, text: Any) -> None:
     """Reject malformed origins and requests before they can become approvable."""
-    from dj_reachy.music_confirmation import PendingMusicConfirmation
+    from dj_reachy_remix.music_confirmation import PendingMusicConfirmation
 
     gate = PendingMusicConfirmation()
     with pytest.raises(ValueError, match="confirmation"):
@@ -164,7 +164,7 @@ def test_prepare_rejects_invalid_authority_or_unpresentable_request(options: Any
 @pytest.fixture
 def offered() -> tuple[Any, Any, dict[str, Any], list[float]]:
     """Offer a real frozen request with a deterministic monotonic lifetime."""
-    from dj_reachy.music_confirmation import PendingMusicConfirmation
+    from dj_reachy_remix.music_confirmation import PendingMusicConfirmation
 
     now = [10.0]
     settings = copy.deepcopy(DEFAULT_SETTINGS)
@@ -363,7 +363,7 @@ def test_original_lifetime_expires_at_exactly_ninety_seconds(offered: Any, bound
 @pytest.mark.parametrize("epoch,turn", [(True, 1), (-1, 1), (2**63, 1), (0, 0), (0, True), (0, 2**63)])
 def test_offer_rejects_invalid_presentation_counters(epoch: Any, turn: Any) -> None:
     """Activation requires bounded local session and actual presentation counters."""
-    from dj_reachy.music_confirmation import PendingMusicConfirmation
+    from dj_reachy_remix.music_confirmation import PendingMusicConfirmation
 
     gate = PendingMusicConfirmation()
     draft = gate.prepare(
@@ -379,7 +379,7 @@ def test_only_latest_locally_prepared_draft_can_be_offered(offered: Any, action:
     """Equal-looking values and delayed presentations cannot manufacture authority."""
     from dataclasses import replace
 
-    from dj_reachy.music_confirmation import PendingMusicConfirmation
+    from dj_reachy_remix.music_confirmation import PendingMusicConfirmation
 
     gate, draft, settings, _ = offered
     if action == "copy":
@@ -586,7 +586,7 @@ def test_speech_before_preview_offer_invalidates_the_prepared_authority(offered:
 
 def test_builder_receives_a_detached_settings_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
     """The validated execution options and settings fingerprint share one snapshot."""
-    import dj_reachy.music_confirmation as domain
+    import dj_reachy_remix.music_confirmation as domain
 
     settings = copy.deepcopy(DEFAULT_SETTINGS)
     expected = copy.deepcopy(validate_generation_request({"prompt": "jazz"}, settings))
@@ -606,7 +606,7 @@ def test_builder_receives_a_detached_settings_snapshot(monkeypatch: pytest.Monke
 @pytest.mark.parametrize("now", [float("nan"), float("inf"), -float("inf")])
 def test_nonfinite_clock_cannot_create_a_draft(now: float) -> None:
     """Invalid lifetime origins fail before publishing any preview value."""
-    from dj_reachy.music_confirmation import PendingMusicConfirmation
+    from dj_reachy_remix.music_confirmation import PendingMusicConfirmation
 
     gate = PendingMusicConfirmation(clock=lambda: now)
     with pytest.raises(ValueError, match="confirmation"):
@@ -716,7 +716,7 @@ def test_unrelated_settings_changes_do_not_rewrite_music(offered: Any) -> None:
 
 def test_explicit_source_overrides_survive_new_defaults() -> None:
     """Repreview uses the source request, preserving explicit user-selected options."""
-    from dj_reachy.music_confirmation import PendingMusicConfirmation
+    from dj_reachy_remix.music_confirmation import PendingMusicConfirmation
 
     settings = copy.deepcopy(DEFAULT_SETTINGS)
     source = {"prompt": "jazz", "music_length_ms": 10000, "positive_styles": ["warm"]}
@@ -773,7 +773,7 @@ def test_expiry_during_offline_validation_cannot_return_a_late_approval(
     offered: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The final consume boundary rechecks time, not just assessment arrival."""
-    import dj_reachy.music_confirmation as domain
+    import dj_reachy_remix.music_confirmation as domain
 
     gate, _, settings, now = offered
     ticket = gate.begin_reply(turn=3, text="the exact request", epoch=7)
@@ -792,7 +792,7 @@ def test_expiry_during_offline_validation_cannot_return_a_late_approval(
 
 def test_same_original_turn_before_offer_is_not_a_fresh_reply() -> None:
     """Delayed original ASR is neither approval nor newer speech cancelling the draft."""
-    from dj_reachy.music_confirmation import PendingMusicConfirmation
+    from dj_reachy_remix.music_confirmation import PendingMusicConfirmation
 
     gate = PendingMusicConfirmation()
     draft = gate.prepare(

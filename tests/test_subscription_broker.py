@@ -28,7 +28,7 @@ def serving(server: ThreadingHTTPServer) -> Iterator[str]:
 
 def test_broker_auth_contains_credentials_and_preserves_consumer_contract() -> None:
     """Reject unauthenticated calls before resolving OAuth; forward exact session config."""
-    from dj_reachy.subscription_broker import BrokerService, CodexCredential, create_server
+    from dj_reachy_remix.subscription_broker import BrokerService, CodexCredential, create_server
 
     observed = []
     resolved = []
@@ -103,7 +103,7 @@ def test_broker_auth_contains_credentials_and_preserves_consumer_contract() -> N
 
 def test_remote_broker_requires_tls_and_strong_token() -> None:
     """Remote plaintext listeners and absent authentication are never allowed."""
-    from dj_reachy.subscription_broker import BrokerService, CodexCredential, create_server
+    from dj_reachy_remix.subscription_broker import BrokerService, CodexCredential, create_server
 
     service = BrokerService(lambda: CodexCredential("fixture-oauth", "fixture-account"))
     with pytest.raises(ValueError, match="TLS"):
@@ -114,7 +114,7 @@ def test_remote_broker_requires_tls_and_strong_token() -> None:
 
 def test_subscription_planner_sse_tool_round_and_no_arbitrary_authority() -> None:
     """Use actual HTTP/SSE, retain tool IDs/results, reject unsafe model calls."""
-    from dj_reachy.subscription_broker import BrokerService, CodexCredential, create_server
+    from dj_reachy_remix.subscription_broker import BrokerService, CodexCredential, create_server
 
     requests = []
     call: dict[str, object] = {
@@ -122,7 +122,7 @@ def test_subscription_planner_sse_tool_round_and_no_arbitrary_authority() -> Non
         "id": "fc_1",
         "call_id": "call_song",
         "name": "make_song_and_dance",
-        "namespace": "dj_reachy",
+        "namespace": "dj_reachy_remix",
         "arguments": json.dumps({"prompt": "Sing a salsa about robots", "music_length_ms": 10000}),
     }
 
@@ -213,7 +213,7 @@ def test_subscription_planner_sse_tool_round_and_no_arbitrary_authority() -> Non
 
 def test_app_calls_reject_unbounded_or_unknown_commands() -> None:
     """Treat model/tool payloads as untrusted, including tools in broker history."""
-    from dj_reachy.voice_planner import validate_app_call
+    from dj_reachy_remix.voice_planner import validate_app_call
 
     for name, args in (
         ("shell", {"command": "id"}),
@@ -228,7 +228,7 @@ def test_app_calls_reject_unbounded_or_unknown_commands() -> None:
 
 def test_explicit_codex_fixture_resolver_never_uses_api_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Read only an injected fixture path, and reject an API-key or expired sign-in."""
-    from dj_reachy.subscription_broker import BrokerError, codex_file_resolver
+    from dj_reachy_remix.subscription_broker import BrokerError, codex_file_resolver
 
     path = tmp_path / "fixture-auth.json"
     monkeypatch.setenv("OPENAI_API_KEY", "fixture-api-never-read")
@@ -263,8 +263,8 @@ def test_explicit_codex_fixture_resolver_never_uses_api_key(tmp_path: Path, monk
 )
 def test_planner_never_executes_partial_or_failed_sse(event: dict[str, object]) -> None:
     """EOF and partial function arguments aren't evidence of a completed tool call."""
-    from dj_reachy.voice_planner import _sse_completed
-    from dj_reachy.subscription_broker import BrokerError
+    from dj_reachy_remix.voice_planner import _sse_completed
+    from dj_reachy_remix.subscription_broker import BrokerError
 
     response = httpx.Response(200, content=("data: " + json.dumps(event) + "\n\n").encode())
     with pytest.raises(BrokerError) as failure:
@@ -274,7 +274,7 @@ def test_planner_never_executes_partial_or_failed_sse(event: dict[str, object]) 
 
 def test_non_ascii_bad_authorization_is_rejected_before_credentials() -> None:
     """Malformed untrusted headers get 401, never a traceback or credential lookup."""
-    from dj_reachy.subscription_broker import BrokerService, create_server
+    from dj_reachy_remix.subscription_broker import BrokerService, create_server
 
     def forbidden() -> NoReturn:
         raise AssertionError("Credentials must not be resolved")
@@ -290,8 +290,8 @@ async def test_broker_client_reports_actionable_entitlement_without_provider_bod
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Propagate the host's safe diagnosis while keeping OAuth and upstream bodies host-side."""
-    from dj_reachy.subscription_voice import broker_request
-    from dj_reachy.subscription_broker import BrokerService, CodexCredential, create_server
+    from dj_reachy_remix.subscription_voice import broker_request
+    from dj_reachy_remix.subscription_broker import BrokerService, CodexCredential, create_server
 
     class RejectedProvider(BaseHTTPRequestHandler):
         def do_POST(self) -> None:
@@ -308,8 +308,8 @@ async def test_broker_client_reports_actionable_entitlement_without_provider_bod
         )
         token = "fixture-scoped-broker-token-32-characters"
         with serving(create_server(service, token, port=0)) as broker:
-            monkeypatch.setenv("DJ_REACHY_SUBSCRIPTION_BROKER_URL", broker + "/session")
-            monkeypatch.setenv("DJ_REACHY_SUBSCRIPTION_BROKER_TOKEN", token)
+            monkeypatch.setenv("DJ_REACHY_REMIX_SUBSCRIPTION_BROKER_URL", broker + "/session")
+            monkeypatch.setenv("DJ_REACHY_REMIX_SUBSCRIPTION_BROKER_TOKEN", token)
             with pytest.raises(RuntimeError, match="entitlement") as failure:
                 await broker_request({"billing": "subscription", "sdp": "v=0\r\n"})
             assert "HTTP 403" in str(failure.value)
@@ -323,7 +323,7 @@ def test_broker_planner_defaults_to_supported_subscription_model(
     """Keep default and CLI selection aligned while preserving explicit overrides."""
     import sys
 
-    import dj_reachy.subscription_broker as broker
+    import dj_reachy_remix.subscription_broker as broker
 
     def unused_credential() -> broker.CodexCredential:
         raise AssertionError("Selector testing must not resolve credentials")
@@ -340,11 +340,11 @@ def test_broker_planner_defaults_to_supported_subscription_model(
         observed.append(service.planner_model)
         raise CapturedServer
 
-    monkeypatch.setenv("DJ_REACHY_CODEX_AUTH_FILE", "/nonexistent-fixture-auth.json")
+    monkeypatch.setenv("DJ_REACHY_REMIX_CODEX_AUTH_FILE", "/nonexistent-fixture-auth.json")
     if override is None:
-        monkeypatch.delenv("DJ_REACHY_SUBSCRIPTION_PLANNER_MODEL", raising=False)
+        monkeypatch.delenv("DJ_REACHY_REMIX_SUBSCRIPTION_PLANNER_MODEL", raising=False)
     else:
-        monkeypatch.setenv("DJ_REACHY_SUBSCRIPTION_PLANNER_MODEL", override)
+        monkeypatch.setenv("DJ_REACHY_REMIX_SUBSCRIPTION_PLANNER_MODEL", override)
     monkeypatch.setattr(sys, "argv", ["subscription-broker"])
     monkeypatch.setattr(broker, "create_server", capture_server)
     with pytest.raises(CapturedServer):
@@ -354,7 +354,7 @@ def test_broker_planner_defaults_to_supported_subscription_model(
 
 def test_subscription_session_uses_app_owned_preparation_and_confirmation(monkeypatch: pytest.MonkeyPatch) -> None:
     """Wire a draft-first contract after persona text without broadening authority."""
-    from dj_reachy.subscription_broker import BrokerService, CodexCredential
+    from dj_reachy_remix.subscription_broker import BrokerService, CodexCredential
 
     observed: list[dict[str, object]] = []
     original_client = httpx.Client

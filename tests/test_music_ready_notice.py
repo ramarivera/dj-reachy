@@ -7,8 +7,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from dj_reachy.openai_realtime import OpenaiRealtimeHandler, voice_config
-from dj_reachy.tools.core_tools import ToolDependencies
+from dj_reachy_remix.openai_realtime import OpenaiRealtimeHandler, voice_config
+from dj_reachy_remix.tools.core_tools import ToolDependencies
 
 
 @pytest.mark.asyncio

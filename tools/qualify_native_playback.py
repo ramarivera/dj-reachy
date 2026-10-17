@@ -63,7 +63,7 @@ try:
             spec.loader.exec_module(module)
             configure=module.configure_native_playback
         else:
-            from dj_reachy.audio.native_playback import configure_native_playback as configure
+            from dj_reachy_remix.audio.native_playback import configure_native_playback as configure
         assert configure(audio)>=.5
     audio._pipeline.get_by_name('measured_output').get_static_pad('sink').add_probe(Gst.PadProbeType.BUFFER,observe)
     audio.start_playing()

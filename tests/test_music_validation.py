@@ -5,7 +5,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from dj_reachy.profiles.dj_reachy.make_song_and_dance import build_music_payload
+from dj_reachy_remix.profiles.dj_reachy.make_song_and_dance import build_music_payload
 
 
 @pytest.mark.parametrize(
@@ -67,7 +67,7 @@ def test_undecodable_output_format_is_rejected_before_credentials(
     monkeypatch: pytest.MonkeyPatch, output_format: str
 ) -> None:
     """Reject codecs the MP3 decoder cannot replay before loading credentials."""
-    import dj_reachy.profiles.dj_reachy.make_song_and_dance as music
+    import dj_reachy_remix.profiles.dj_reachy.make_song_and_dance as music
 
     def no_key(*_args: object) -> str:
         raise AssertionError("Unsupported formats must fail before loading credentials")

@@ -16,9 +16,9 @@ from collections.abc import AsyncIterator
 import pytest
 import pytest_asyncio
 
-import dj_reachy.subscription_voice as subscription
-from dj_reachy.openai_realtime import OpenaiRealtimeHandler
-from dj_reachy.tools.core_tools import ToolDependencies
+import dj_reachy_remix.subscription_voice as subscription
+from dj_reachy_remix.openai_realtime import OpenaiRealtimeHandler
+from dj_reachy_remix.tools.core_tools import ToolDependencies
 
 
 ORIGINAL = "Make a 10-second road-trip song about driving down the coast."
@@ -109,10 +109,10 @@ async def test_confirmation_keeps_original_task_available_to_planner(
     print("SYNTHETIC_PLANNER_INPUT=" + json.dumps(request, sort_keys=True))
     assert request["transcript"].startswith("go ahead"), "Current user words retain priority"
     assert request["transcript"] == "go ahead"
-    from dj_reachy.voice_planner import _validate_history
+    from dj_reachy_remix.voice_planner import _validate_history
 
     assert _validate_history(request["history"]) == request["history"]
-    from dj_reachy.voice_planner import DELEGATION_CONTEXT_PREFIX
+    from dj_reachy_remix.voice_planner import DELEGATION_CONTEXT_PREFIX
 
     assert 1 <= len(request["history"]) <= 2
     assert all(item["type"] == "message" and item["role"] == "assistant" for item in request["history"])
@@ -132,7 +132,7 @@ async def test_current_control_wins_over_canonical_song_and_duplicate(
     confirmation: ConfirmationHarness, monkeypatch: pytest.MonkeyPatch, control: str
 ) -> None:
     """Context repair must not let a model task defeat current local controls."""
-    import dj_reachy.openai_realtime as realtime
+    import dj_reachy_remix.openai_realtime as realtime
 
     dispatched: list[str] = []
 
@@ -159,8 +159,8 @@ async def test_confirmation_context_survives_real_host_planner_encoding(
     """Pass the actual serialized history through host validation and SSE decoding."""
     import httpx
 
-    import dj_reachy.voice_planner as planner
-    from dj_reachy.subscription_broker import CodexCredential
+    import dj_reachy_remix.voice_planner as planner
+    from dj_reachy_remix.subscription_broker import CodexCredential
 
     await confirmation.user(ORIGINAL)
     await confirmation.user("go ahead")
@@ -209,7 +209,7 @@ async def test_executed_turn_context_clears_without_erasing_newer_speech(
     confirmation: ConfirmationHarness, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An admitted app command consumes its context, not speech arriving during IO."""
-    import dj_reachy.openai_realtime as realtime
+    import dj_reachy_remix.openai_realtime as realtime
 
     planning = asyncio.Event()
     release = asyncio.Event()

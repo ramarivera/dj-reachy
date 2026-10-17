@@ -11,13 +11,13 @@ from collections.abc import AsyncIterator
 import pytest
 import pytest_asyncio
 
-import dj_reachy.config as app_config
-import dj_reachy.openai_realtime as realtime
-import dj_reachy.subscription_voice as voice
-from dj_reachy.voice_planner import DELEGATION_CONTEXT_PREFIX, PENDING_USER_CONTEXT_PREFIX
-from dj_reachy.runtime_settings import DEFAULT_SETTINGS
-from dj_reachy.tools.core_tools import ToolDependencies
-from dj_reachy.subscription_voice import SubscriptionRealtimeAdapter, SubscriptionRealtimeConnection
+import dj_reachy_remix.config as app_config
+import dj_reachy_remix.openai_realtime as realtime
+import dj_reachy_remix.subscription_voice as voice
+from dj_reachy_remix.voice_planner import DELEGATION_CONTEXT_PREFIX, PENDING_USER_CONTEXT_PREFIX
+from dj_reachy_remix.runtime_settings import DEFAULT_SETTINGS
+from dj_reachy_remix.tools.core_tools import ToolDependencies
+from dj_reachy_remix.subscription_voice import SubscriptionRealtimeAdapter, SubscriptionRealtimeConnection
 
 
 async def emit(connection: SubscriptionRealtimeConnection, kind: str, **fields: object) -> SimpleNamespace:

@@ -15,7 +15,7 @@ from numpy.typing import NDArray
 from test_openai_realtime import _build_handler
 from test_native_audio_responsiveness import BlockingMedia, make_stream
 
-from dj_reachy.console import _PlaybackFence
+from dj_reachy_remix.console import _PlaybackFence
 
 
 _CallResult = TypeVar("_CallResult")

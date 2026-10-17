@@ -9,7 +9,7 @@ from collections.abc import Callable
 
 import numpy as np
 
-from dj_reachy.audio.head_wobbler import HeadWobbler
+from dj_reachy_remix.audio.head_wobbler import HeadWobbler
 
 
 def _make_audio_chunk(duration_s: float = 0.3, frequency_hz: float = 220.0) -> str:

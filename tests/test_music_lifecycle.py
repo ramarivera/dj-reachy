@@ -16,8 +16,8 @@ import numpy as np
 import pytest
 from numpy.typing import NDArray
 
-import dj_reachy.profiles.dj_reachy.make_song_and_dance as music
-from dj_reachy.tools.core_tools import ToolDependencies
+import dj_reachy_remix.profiles.dj_reachy.make_song_and_dance as music
+from dj_reachy_remix.tools.core_tools import ToolDependencies
 
 
 @dataclass
@@ -407,7 +407,7 @@ async def test_stop_acknowledges_reaped_process_and_finished_motion_fade(
     actor: PlaybackActor, real_mp3: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Return stop only after process cleanup and the bounded real motion fade."""
-    from dj_reachy.audio.music_dancer import MusicDancer
+    from dj_reachy_remix.audio.music_dancer import MusicDancer
 
     offsets = []
     dancer = MusicDancer(lambda *values: offsets.append(values), intensity=0.2)
@@ -594,7 +594,7 @@ async def test_repeated_shutdown_cancellation_cannot_release_owner_before_fade(
     actor: PlaybackActor, real_mp3: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Keep admission reserved until a canceled owner's fade thread exits."""
-    from dj_reachy.audio.music_dancer import MusicDancer
+    from dj_reachy_remix.audio.music_dancer import MusicDancer
 
     offsets = []
     dancer = MusicDancer(lambda *values: offsets.append(values), intensity=0.2)

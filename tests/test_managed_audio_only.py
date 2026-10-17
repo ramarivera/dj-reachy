@@ -8,7 +8,7 @@ from collections.abc import Iterator
 import pytest
 
 from reachy_mini import ReachyMiniApp
-import dj_reachy.main as main
+import dj_reachy_remix.main as main
 
 
 @pytest.mark.parametrize(("flags", "expected_backend", "daemon_local"), [
@@ -23,7 +23,7 @@ def test_sdk_managed_robot_backend_honors_camera_flag(
     monkeypatch: pytest.MonkeyPatch, flags: list[str], expected_backend: str, daemon_local: bool
 ) -> None:
     """Exercise the real SDK wrapper but intercept the device constructor."""
-    monkeypatch.setattr(sys, "argv", ["dj-reachy", *flags])
+    monkeypatch.setattr(sys, "argv", ["dj-reachy-remix", *flags])
     monkeypatch.setattr(main.ReachyMiniConversationApp, "dont_start_webserver", True)
     # Older supported SDKs lack the locality attribute; model the current
     # SDK's discovery result while still exercising its real managed wrapper.

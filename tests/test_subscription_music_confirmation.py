@@ -13,12 +13,12 @@ import httpx
 import pytest
 import pytest_asyncio
 
-import dj_reachy.config as app_config
-import dj_reachy.openai_realtime as realtime
-import dj_reachy.subscription_voice as subscription
-from dj_reachy.runtime_settings import DEFAULT_SETTINGS
-from dj_reachy.tools.core_tools import ToolDependencies
-from dj_reachy.subscription_broker import BrokerService, CodexCredential
+import dj_reachy_remix.config as app_config
+import dj_reachy_remix.openai_realtime as realtime
+import dj_reachy_remix.subscription_voice as subscription
+from dj_reachy_remix.runtime_settings import DEFAULT_SETTINGS
+from dj_reachy_remix.tools.core_tools import ToolDependencies
+from dj_reachy_remix.subscription_broker import BrokerService, CodexCredential
 
 
 ORIGINAL = "Make a ten-second song about our coastal road trip, with a gentle jazz mood."
@@ -73,7 +73,7 @@ class WireHarness:
                     {
                         "type": "function_call",
                         "call_id": "fixture-metadata",
-                        "namespace": "dj_reachy",
+                        "namespace": "dj_reachy_remix",
                         "name": "music_confirmation_decision",
                         "arguments": json.dumps(
                             {"decision": self.decision, "arguments": self.revision, "text": self.decision_text}
@@ -93,7 +93,7 @@ class WireHarness:
                     {
                         "type": "function_call",
                         "call_id": "fixture-candidate",
-                        "namespace": "dj_reachy",
+                        "namespace": "dj_reachy_remix",
                         "name": self.normal_name,
                         "arguments": json.dumps(self.normal_args),
                     }
@@ -617,7 +617,7 @@ async def test_original_final_wait_is_bounded_and_cancellable(
 @pytest.mark.parametrize("during", [False, True], ids=["before-reply", "during-classification"])
 async def test_expiry_uses_real_domain_lifetime(wire: WireHarness, during: bool) -> None:
     """The handler relies on the ninety-second domain bound rather than renewing it."""
-    from dj_reachy.music_confirmation import PendingMusicConfirmation
+    from dj_reachy_remix.music_confirmation import PendingMusicConfirmation
 
     clock = [0.0]
     wire.app._pending_music = PendingMusicConfirmation(clock=lambda: clock[0])

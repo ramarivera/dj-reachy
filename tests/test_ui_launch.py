@@ -32,9 +32,9 @@ def construction_loop() -> Iterator[None]:
 
 def test_managed_launch_uses_user_home_not_sdk_instance(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """SDK module paths never own runtime settings, songs or persona."""
-    from dj_reachy import main, moves, console
-    from dj_reachy.audio import head_wobbler
-    from dj_reachy.config import config
+    from dj_reachy_remix import main, moves, console
+    from dj_reachy_remix.audio import head_wobbler
+    from dj_reachy_remix.config import config
 
     status_fields: dict[str, Any] = {
         "robot_name": "fixture", "state": DaemonState.RUNNING,
@@ -75,7 +75,7 @@ def test_managed_launch_uses_user_home_not_sdk_instance(tmp_path: Path, monkeypa
     assert len(launched) == 1
     with TestClient(app) as client:
         assert client.get("/").status_code == 200
-        response = client.put("/api/dj-reachy/settings", json={"music": {"duration_ms": 10000}})
+        response = client.put("/api/dj-reachy-remix/settings", json={"music": {"duration_ms": 10000}})
         assert response.status_code == 200, response.text
         assert config.ELEVEN_MUSIC_LENGTH_MS == 10000
         assert client.get("/static/main.js").status_code == 200
@@ -85,8 +85,8 @@ def test_managed_launch_uses_user_home_not_sdk_instance(tmp_path: Path, monkeypa
 
 def test_cli_parser_and_sdk_app_delegate(monkeypatch: pytest.MonkeyPatch) -> None:
     """The SDK entry point retains the real CLI media flags."""
-    from dj_reachy import main
-    monkeypatch.setattr("sys.argv", ["dj-reachy", "--no-camera", "--gradio"])
+    from dj_reachy_remix import main
+    monkeypatch.setattr("sys.argv", ["dj-reachy-remix", "--no-camera", "--gradio"])
     args, unknown = main.parse_args()
     assert args.gradio and args.no_camera
     assert not unknown
@@ -106,10 +106,10 @@ def test_gradio_mounts_shared_settings_and_does_not_serialize_keys(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The constructed browser app exposes settings even with credentials."""
-    from dj_reachy import main
-    from dj_reachy.config import config
-    from dj_reachy.openai_realtime import OpenaiRealtimeHandler
-    from dj_reachy.tools.core_tools import ToolDependencies
+    from dj_reachy_remix import main
+    from dj_reachy_remix.config import config
+    from dj_reachy_remix.openai_realtime import OpenaiRealtimeHandler
+    from dj_reachy_remix.tools.core_tools import ToolDependencies
 
     monkeypatch.setattr(config, "APP_HOME", tmp_path)
     monkeypatch.setattr(config, "RUNTIME_SETTINGS_PATH", tmp_path / "settings.json")
@@ -120,17 +120,17 @@ def test_gradio_mounts_shared_settings_and_does_not_serialize_keys(
     main.mount_voice_ui(app, handler)
     with TestClient(app) as client:
         assert client.get("/").status_code == 200
-        assert client.get("/api/dj-reachy/settings").status_code == 200
+        assert client.get("/api/dj-reachy-remix/settings").status_code == 200
         response = client.get("/voice/config")
         assert response.status_code == 200, response.text
         assert "fixture-not-for-browser" not in response.text
-        assert client.post("/api/dj-reachy/music/stop", json={}).status_code == 409
+        assert client.post("/api/dj-reachy-remix/music/stop", json={}).status_code == 409
 
 
 def test_cli_explicit_backend_and_no_hardware_settings_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     """Select API billing explicitly without constructing a robot."""
-    from dj_reachy.main import parse_args
-    monkeypatch.setattr("sys.argv", ["dj-reachy", "--settings-only", "--voice-backend", "api_key"])
+    from dj_reachy_remix.main import parse_args
+    monkeypatch.setattr("sys.argv", ["dj-reachy-remix", "--settings-only", "--voice-backend", "api_key"])
     args, unknown = parse_args()
     assert not unknown
     assert args.settings_only is True
@@ -145,10 +145,10 @@ async def test_gradio_controls_target_live_component_handler(
     import httpx
     import numpy as np
 
-    from dj_reachy import main
-    from dj_reachy.config import config
-    from dj_reachy.openai_realtime import OpenaiRealtimeHandler
-    from dj_reachy.tools.core_tools import ToolDependencies
+    from dj_reachy_remix import main
+    from dj_reachy_remix.config import config
+    from dj_reachy_remix.openai_realtime import OpenaiRealtimeHandler
+    from dj_reachy_remix.tools.core_tools import ToolDependencies
 
     monkeypatch.setattr(config, "RUNTIME_SETTINGS_PATH", tmp_path / "settings.json")
     deps = ToolDependencies(reachy_mini=Mock(), movement_manager=Mock())
@@ -160,7 +160,7 @@ async def test_gradio_controls_target_live_component_handler(
     stream = main.mount_voice_ui(app, template)
     stream.webrtc_component.handlers["fixture-connection"] = active
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://fixture") as client:
-        response = await client.post("/api/dj-reachy/music/stop", json={})
+        response = await client.post("/api/dj-reachy-remix/music/stop", json={})
     assert response.status_code == 200, response.text
     assert active.output_queue.empty()
     assert deps.openai_realtime_handler is active

@@ -11,11 +11,11 @@ from collections.abc import Mapping, AsyncIterator
 import pytest
 import pytest_asyncio
 
-import dj_reachy.config as app_config
-from dj_reachy.openai_realtime import OpenaiRealtimeHandler
-from dj_reachy.runtime_settings import DEFAULT_SETTINGS
-from dj_reachy.tools.core_tools import ToolDependencies
-from dj_reachy.subscription_voice import SubscriptionRealtimeAdapter, SubscriptionRealtimeConnection
+import dj_reachy_remix.config as app_config
+from dj_reachy_remix.openai_realtime import OpenaiRealtimeHandler
+from dj_reachy_remix.runtime_settings import DEFAULT_SETTINGS
+from dj_reachy_remix.tools.core_tools import ToolDependencies
+from dj_reachy_remix.subscription_voice import SubscriptionRealtimeAdapter, SubscriptionRealtimeConnection
 
 
 MODEL_REQUEST_PREFIX = "Live model delegation request (not a verbatim user transcript):\n"
@@ -143,7 +143,7 @@ async def test_content_only_controls_have_distinct_correlations(
     live: DelegationHarness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Canonical controls execute locally once per ID, without a planner round or turn0 collision."""
-    import dj_reachy.openai_realtime as realtime
+    import dj_reachy_remix.openai_realtime as realtime
 
     commands: list[str] = []
 
@@ -274,7 +274,7 @@ async def test_content_stop_preempts_work_and_rejects_cancellation_resistant_res
     live: DelegationHarness, monkeypatch: pytest.MonkeyPatch, blocked_at: str
 ) -> None:
     """Local stop dispatches before blocked work is released, with no stale result or song restart."""
-    import dj_reachy.openai_realtime as realtime
+    import dj_reachy_remix.openai_realtime as realtime
 
     entered, released, stopped = asyncio.Event(), asyncio.Event(), asyncio.Event()
     cancelled: list[bool] = []
@@ -363,7 +363,7 @@ async def test_inactive_handler_cannot_execute_content_controls(
     live: DelegationHarness, monkeypatch: pytest.MonkeyPatch, inactive: str
 ) -> None:
     """Reject delegated control work before creating local side effects for inactive owners."""
-    import dj_reachy.openai_realtime as realtime
+    import dj_reachy_remix.openai_realtime as realtime
 
     commands: list[str] = []
 
@@ -392,7 +392,7 @@ async def test_additive_metadata_preserves_current_words_over_model_control(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Compatible metadata must not promote model/commentary words into user controls."""
-    import dj_reachy.openai_realtime as realtime
+    import dj_reachy_remix.openai_realtime as realtime
 
     commands: list[str] = []
 

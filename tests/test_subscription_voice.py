@@ -8,7 +8,7 @@ import pytest
 from aiortc import RTCDataChannel, MediaStreamTrack
 from numpy.typing import NDArray
 
-from dj_reachy.subscription_voice import fast_control, build_context_messages, require_subscription_broker
+from dj_reachy_remix.subscription_voice import fast_control, build_context_messages, require_subscription_broker
 
 
 class ContextMessage(TypedDict):
@@ -37,8 +37,8 @@ def test_fast_controls_do_not_classify_general_requests() -> None:
 
 def test_subscription_backend_fails_closed_without_scoped_broker(monkeypatch: pytest.MonkeyPatch) -> None:
     """Missing scoped signaling fails before any billing path can be chosen."""
-    monkeypatch.delenv("DJ_REACHY_SUBSCRIPTION_BROKER_URL", raising=False)
-    monkeypatch.delenv("DJ_REACHY_SUBSCRIPTION_BROKER_TOKEN", raising=False)
+    monkeypatch.delenv("DJ_REACHY_REMIX_SUBSCRIPTION_BROKER_URL", raising=False)
+    monkeypatch.delenv("DJ_REACHY_REMIX_SUBSCRIPTION_BROKER_TOKEN", raising=False)
     with pytest.raises(RuntimeError, match="broker URL"):
         require_subscription_broker()
 
@@ -54,7 +54,7 @@ async def test_remote_pcm_uses_real_av_frames_without_padding() -> None:
     import numpy as np
     from aiortc.mediastreams import MediaStreamError
 
-    from dj_reachy.subscription_voice import SubscriptionRealtimeAdapter
+    from dj_reachy_remix.subscription_voice import SubscriptionRealtimeAdapter
 
     class Track:
         def __init__(self) -> None:
@@ -89,8 +89,8 @@ async def test_real_webrtc_ready_context_pcm_and_cleanup(tmp_path: Path) -> None
     import numpy as np
     from aiortc import RTCConfiguration, RTCPeerConnection, RTCSessionDescription
 
-    from dj_reachy.voice_media import MicrophoneTrack
-    from dj_reachy.subscription_voice import SubscriptionRealtimeAdapter
+    from dj_reachy_remix.voice_media import MicrophoneTrack
+    from dj_reachy_remix.subscription_voice import SubscriptionRealtimeAdapter
 
     peer = RTCPeerConnection(RTCConfiguration(iceServers=[]))
     received_context: asyncio.Queue[ContextMessage] = asyncio.Queue()
@@ -184,7 +184,7 @@ async def test_slow_audio_consumer_cannot_discard_stop_transcript() -> None:
     """Bound media backlog separately from control events."""
     from types import SimpleNamespace
 
-    from dj_reachy.subscription_voice import SubscriptionRealtimeAdapter
+    from dj_reachy_remix.subscription_voice import SubscriptionRealtimeAdapter
 
     connection = SubscriptionRealtimeAdapter().connect()
     connection._enqueue(SimpleNamespace(type="turn.done", turn={"role": "user", "transcript": "stop music"}))
@@ -206,7 +206,7 @@ async def test_slow_audio_consumer_cannot_discard_stop_transcript() -> None:
 )
 async def test_enter_failure_closes_real_peer_and_media(answer: dict[str, object]) -> None:
     """Reject wrong billing and malformed SDP before starting any audio or fallback."""
-    from dj_reachy.subscription_voice import SubscriptionRealtimeAdapter
+    from dj_reachy_remix.subscription_voice import SubscriptionRealtimeAdapter
 
     posts = []
 
@@ -241,7 +241,7 @@ async def test_context_waits_for_consumer_ready_not_only_channel_open() -> None:
 
     from aiortc import RTCConfiguration, RTCPeerConnection, RTCSessionDescription
 
-    from dj_reachy.subscription_voice import SubscriptionRealtimeAdapter
+    from dj_reachy_remix.subscription_voice import SubscriptionRealtimeAdapter
 
     peer = RTCPeerConnection(RTCConfiguration(iceServers=[]))
     channel_ready = asyncio.Event()

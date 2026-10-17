@@ -6,7 +6,7 @@ from collections.abc import Iterator
 import numpy as np
 import pytest
 
-from dj_reachy.audio.speech_tapper import HOP, FRAME, SwayRollRT
+from dj_reachy_remix.audio.speech_tapper import HOP, FRAME, SwayRollRT
 
 
 class CountedSamples(deque[float]):

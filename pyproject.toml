@@ -3,10 +3,10 @@ requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "dj-reachy"
+name = "dj-reachy-remix"
 version = "0.1.0"
 authors = [{ name = "Max Zurkinden", email = "max.zurkinden@gmail.com" }]
-description = ""
+description = "DJ Reachy Remix: independent music and subscription-voice fork"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -59,10 +59,10 @@ dev = [
 ]
 
 [project.scripts]
-dj-reachy = "dj_reachy.main:main"
+dj-reachy-remix = "dj_reachy_remix.main:main"
 
 [project.entry-points."reachy_mini_apps"]
-dj_reachy = "dj_reachy.main:ReachyMiniConversationApp"
+dj_reachy_remix = "dj_reachy_remix.main:ReachyMiniConversationApp"
 
 [tool.setuptools]
 package-dir = { "" = "src" }
@@ -70,9 +70,10 @@ include-package-data = true
 
 [tool.setuptools.packages.find]
 where = ["src"]
+include = ["dj_reachy_remix*"]
 
 [tool.setuptools.package-data]
-dj_reachy = [
+dj_reachy_remix = [
   "images/*",
   "static/*",
   ".env.example",
@@ -106,7 +107,7 @@ ignore = [
 length-sort = true
 lines-after-imports = 2
 no-lines-before = ["standard-library", "local-folder"]
-known-local-folder = ["dj_reachy"]
+known-local-folder = ["dj_reachy_remix"]
 known-first-party = ["reachy_mini", "reachy_mini_dances_library", "reachy_mini_toolbox"]
 split-on-trailing-comma = true
 

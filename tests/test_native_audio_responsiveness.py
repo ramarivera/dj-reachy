@@ -12,8 +12,8 @@ import pytest
 from numpy.typing import NDArray
 
 from reachy_mini import ReachyMini
-from dj_reachy.console import LocalStream
-from dj_reachy.openai_realtime import OpenaiRealtimeHandler
+from dj_reachy_remix.console import LocalStream
+from dj_reachy_remix.openai_realtime import OpenaiRealtimeHandler
 
 
 class BlockingMedia:
@@ -267,7 +267,7 @@ async def test_controls_progress_during_synchronous_native_io(lane: str) -> None
 @pytest.mark.parametrize("lane", ["capture", "playback"])
 async def test_launch_close_drains_inflight_io_before_media_stop(lane: str, monkeypatch: pytest.MonkeyPatch) -> None:
     """Real launch/close retains SDK ownership after asyncio cancellation."""
-    from dj_reachy.config import config
+    from dj_reachy_remix.config import config
 
     monkeypatch.setattr(config, "VOICE_BACKEND", "subscription")
     media = BlockingMedia(lane)
@@ -446,8 +446,8 @@ def test_permanently_stalled_io_uses_explicit_process_kill_boundary(lane: str) -
         """
         import runpy, sys, threading
         from pathlib import Path
-        from dj_reachy.console import config, __file__ as origin
-        assert Path(origin).resolve() == Path(sys.argv[1]).resolve().parents[1] / 'src/dj_reachy/console.py'
+        from dj_reachy_remix.console import config, __file__ as origin
+        assert Path(origin).resolve() == Path(sys.argv[1]).resolve().parents[1] / 'src/dj_reachy_remix/console.py'
         fixtures = runpy.run_path(sys.argv[1])
         media = fixtures['BlockingMedia'](sys.argv[2])
         def stalled(lane):

@@ -10,12 +10,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
-import dj_reachy.config as app_config
-import dj_reachy.openai_realtime as realtime
-from dj_reachy.openai_realtime import OpenaiRealtimeHandler
-from dj_reachy.runtime_settings import DEFAULT_SETTINGS
-from dj_reachy.tools.core_tools import ToolDependencies
-from dj_reachy.subscription_voice import SubscriptionRealtimeAdapter
+import dj_reachy_remix.config as app_config
+import dj_reachy_remix.openai_realtime as realtime
+from dj_reachy_remix.openai_realtime import OpenaiRealtimeHandler
+from dj_reachy_remix.runtime_settings import DEFAULT_SETTINGS
+from dj_reachy_remix.tools.core_tools import ToolDependencies
+from dj_reachy_remix.subscription_voice import SubscriptionRealtimeAdapter
 
 
 ORIGINAL = "sing me a ten-second salsa about robots"
@@ -354,8 +354,8 @@ async def test_turn_controls_preempt_work_and_reject_stale_results(
 @pytest.mark.asyncio
 async def test_shutdown_owns_in_progress_webrtc_handshake(monkeypatch: pytest.MonkeyPatch) -> None:
     """Shutdown must cancel setup even before __aenter__ publishes the connection."""
-    from dj_reachy.config import config
-    from dj_reachy.subscription_voice import SubscriptionRealtimeAdapter
+    from dj_reachy_remix.config import config
+    from dj_reachy_remix.subscription_voice import SubscriptionRealtimeAdapter
 
     entered = asyncio.Event()
     forever = asyncio.Event()
@@ -394,8 +394,8 @@ async def test_explicit_reconnect_replaces_real_webrtc_without_duplicate_receive
 
     from aiortc import RTCDataChannel, RTCConfiguration, RTCPeerConnection, RTCSessionDescription
 
-    from dj_reachy.config import config
-    from dj_reachy.subscription_voice import SubscriptionRealtimeAdapter
+    from dj_reachy_remix.config import config
+    from dj_reachy_remix.subscription_voice import SubscriptionRealtimeAdapter
 
     peers = []
     app = handler()
@@ -442,7 +442,7 @@ async def test_explicit_reconnect_replaces_real_webrtc_without_duplicate_receive
 
 def test_subscription_selection_never_constructs_api_client(monkeypatch: pytest.MonkeyPatch) -> None:
     """Even a supplied API key cannot be used by subscription Live."""
-    from dj_reachy.config import config
+    from dj_reachy_remix.config import config
 
     def forbidden(**kwargs: object) -> NoReturn:
         raise AssertionError("API-key billing was selected implicitly")

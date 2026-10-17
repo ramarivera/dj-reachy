@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 
-MAIN_JS = Path(__file__).resolve().parents[1] / "src/dj_reachy/static/main.js"
+MAIN_JS = Path(__file__).resolve().parents[1] / "src/dj_reachy_remix/static/main.js"
 NODE = shutil.which("node")
 
 HARNESS = r"""
@@ -117,9 +117,9 @@ def execute_dashboard(page: str, script: str) -> DashboardResult:
     "prefix,page_suffix",
     [
         ("", "/"),
-        ("/native/apps/dj-reachy", "/"),
-        ("/native/apps/dj-reachy", ""),
-        ("/native/apps/dj-reachy", "/?view=settings#music"),
+        ("/native/apps/dj-reachy-remix", "/"),
+        ("/native/apps/dj-reachy-remix", ""),
+        ("/native/apps/dj-reachy-remix", "/?view=settings#music"),
     ],
 )
 def test_api_requests_stay_under_the_loaded_app(prefix: str, page_suffix: str) -> None:
@@ -130,19 +130,19 @@ def test_api_requests_stay_under_the_loaded_app(prefix: str, page_suffix: str) -
     )
     actual = [(r["path"], r["method"]) for r in result["requests"] if "/api/" in r["path"]]
     assert actual == [
-        (f"{prefix}/api/dj-reachy/settings", "GET"),
-        (f"{prefix}/api/dj-reachy/instructions", "GET"),
-        (f"{prefix}/api/dj-reachy/status", "GET"),
-        (f"{prefix}/api/dj-reachy/settings", "PUT"),
-        (f"{prefix}/api/dj-reachy/music/stop", "POST"),
-        (f"{prefix}/api/dj-reachy/music/replay", "POST"),
+        (f"{prefix}/api/dj-reachy-remix/settings", "GET"),
+        (f"{prefix}/api/dj-reachy-remix/instructions", "GET"),
+        (f"{prefix}/api/dj-reachy-remix/status", "GET"),
+        (f"{prefix}/api/dj-reachy-remix/settings", "PUT"),
+        (f"{prefix}/api/dj-reachy-remix/music/stop", "POST"),
+        (f"{prefix}/api/dj-reachy-remix/music/replay", "POST"),
     ]
     replay = next(r for r in result["requests"] if r["path"].endswith("/music/replay"))
     assert replay["body"] is not None
     assert json.loads(replay["body"]) == {"filename": "space # café?.mp3"}
 
 
-@pytest.mark.parametrize("prefix", ["", "/native/apps/dj-reachy"])
+@pytest.mark.parametrize("prefix", ["", "/native/apps/dj-reachy-remix"])
 def test_song_listing_delete_and_audio_stay_under_the_loaded_app(prefix: str) -> None:
     """Media and deletion share the proxy root and preserve filename encoding."""
     result = execute_dashboard(

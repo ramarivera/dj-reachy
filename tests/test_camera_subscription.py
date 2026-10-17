@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from dj_reachy.voice_planner import app_tool_specs, validate_app_call
+from dj_reachy_remix.voice_planner import app_tool_specs, validate_app_call
 
 
 def test_camera_is_exposed_in_both_dj_registries() -> None:
@@ -15,13 +15,13 @@ def test_camera_is_exposed_in_both_dj_registries() -> None:
     assert validate_app_call("camera", {"question": "What is in front of you?"}) == (
         "camera", {"question": "What is in front of you?"}
     )
-    profile = Path(__file__).resolve().parents[1] / "src/dj_reachy/profiles/dj_reachy/tools.txt"
+    profile = Path(__file__).resolve().parents[1] / "src/dj_reachy_remix/profiles/dj_reachy/tools.txt"
     assert "camera" in profile.read_text().splitlines()
 
 
 def test_live_frontend_knows_camera_and_background_generation() -> None:
     """The Live frontend must delegate supported vision instead of refusing it."""
-    from dj_reachy.subscription_broker import compose_live_instructions
+    from dj_reachy_remix.subscription_broker import compose_live_instructions
 
     # Check the assembled wire policy, not only its generic persona header.
     text = compose_live_instructions("Synthetic custom persona.").lower()
@@ -37,8 +37,8 @@ def test_subscription_camera_result_is_a_typed_image_not_base64_text(monkeypatch
     import httpx
     import numpy as np
 
-    from dj_reachy.voice_planner import subscription_plan
-    from dj_reachy.subscription_broker import CodexCredential
+    from dj_reachy_remix.voice_planner import subscription_plan
+    from dj_reachy_remix.subscription_broker import CodexCredential
 
     ok, data = cv2.imencode(".jpg", np.full((16, 16, 3), 90, dtype=np.uint8))
     assert ok
@@ -87,8 +87,8 @@ async def test_camera_encodes_a_bounded_jpeg_without_persisting_frames() -> None
     import cv2
     import numpy as np
 
-    from dj_reachy.tools.camera import Camera
-    from dj_reachy.tools.core_tools import ToolDependencies
+    from dj_reachy_remix.tools.camera import Camera
+    from dj_reachy_remix.tools.core_tools import ToolDependencies
 
     worker = MagicMock()
     worker.get_latest_frame.return_value = np.random.default_rng(4).integers(0, 256, (1080, 1920, 3), dtype=np.uint8)
@@ -106,8 +106,8 @@ async def test_camera_bytes_are_not_sent_as_live_frontend_text(monkeypatch: pyte
     from types import SimpleNamespace
     from unittest.mock import AsyncMock, MagicMock
 
-    from dj_reachy.openai_realtime import OpenaiRealtimeHandler
-    from dj_reachy.tools.core_tools import ToolDependencies
+    from dj_reachy_remix.openai_realtime import OpenaiRealtimeHandler
+    from dj_reachy_remix.tools.core_tools import ToolDependencies
 
     app = OpenaiRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
     call = {"type": "function_call", "call_id": "cam", "name": "camera", "arguments": json.dumps({"question": "What do you see?"})}

@@ -13,9 +13,9 @@ import pytest
 import test_music_lifecycle as lifecycle
 from test_music_generation import compose_server
 
-import dj_reachy.profiles.dj_reachy.make_song_and_dance as music
-from dj_reachy.config import config
-from dj_reachy.tools.core_tools import ToolDependencies
+import dj_reachy_remix.profiles.dj_reachy.make_song_and_dance as music
+from dj_reachy_remix.config import config
+from dj_reachy_remix.tools.core_tools import ToolDependencies
 
 
 actor = lifecycle.actor

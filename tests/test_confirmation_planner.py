@@ -8,9 +8,9 @@ from typing import Any
 import httpx
 import pytest
 
-from dj_reachy import subscription_voice
-from dj_reachy.voice_planner import validate_confirmation_input
-from dj_reachy.subscription_broker import BrokerError, BrokerService, CodexCredential
+from dj_reachy_remix import subscription_voice
+from dj_reachy_remix.voice_planner import validate_confirmation_input
+from dj_reachy_remix.subscription_broker import BrokerError, BrokerService, CodexCredential
 
 
 @pytest.fixture(autouse=True)
@@ -43,7 +43,7 @@ def pending_request() -> dict[str, Any]:
 def decision_item(decision: str = "approve", arguments: Any = None, text: str = "De acuerdo.") -> dict[str, Any]:
     """Produce one complete metadata function, never an app execution call."""
     return {
-        "type": "function_call", "call_id": "provider-call-1", "namespace": "dj_reachy",
+        "type": "function_call", "call_id": "provider-call-1", "namespace": "dj_reachy_remix",
         "name": "music_confirmation_decision",
         "arguments": json.dumps({"decision": decision, "arguments": arguments, "text": text}),
     }
@@ -82,7 +82,7 @@ def test_confirmation_policy_never_approves_unapplied_setting_changes(monkeypatc
 def test_normal_music_planning_prepares_unbilled_draft_before_confirmation(monkeypatch: pytest.MonkeyPatch) -> None:
     """Describe preparation truthfully at the same real SSE serialization boundary."""
     item = {
-        "type": "function_call", "call_id": "fixture-preparation", "namespace": "dj_reachy",
+        "type": "function_call", "call_id": "fixture-preparation", "namespace": "dj_reachy_remix",
         "name": "make_song_and_dance", "arguments": json.dumps({"prompt": "Instrumental road-trip rock", "music_length_ms": 10000}),
     }
     observed = install_provider(monkeypatch, [item])
@@ -146,7 +146,7 @@ async def test_actual_adapter_to_host_sse_confirmation_envelope(monkeypatch: pyt
     assert payload["input"][-1] == {"type": "message", "role": "user", "content": [{"type": "input_text", "text": reply}]}
     assert json.loads(payload["input"][0]["content"].split("\n", 1)[1]) == pending
     tools = payload["tools"]
-    assert tools[0]["name"] == "dj_reachy"
+    assert tools[0]["name"] == "dj_reachy_remix"
     assert [tool["name"] for tool in tools[0]["tools"]] == ["music_confirmation_decision"]
     parameters = tools[0]["tools"][0]["parameters"]
     assert set(parameters["properties"]) == set(parameters["required"]) == {"decision", "arguments", "text"}
@@ -333,8 +333,8 @@ def test_unicode_decision_bounds_allow_escaped_json(monkeypatch: pytest.MonkeyPa
 
 def test_domain_pending_payload_matches_planner_contract() -> None:
     """The real pure draft producer exports expanded options accepted by the host."""
-    from dj_reachy.runtime_settings import DEFAULT_SETTINGS
-    from dj_reachy.music_confirmation import PendingMusicConfirmation
+    from dj_reachy_remix.runtime_settings import DEFAULT_SETTINGS
+    from dj_reachy_remix.music_confirmation import PendingMusicConfirmation
 
     manager = PendingMusicConfirmation(clock=lambda: 1.0)
     draft = manager.prepare({"prompt": "Calm jazz"}, json.loads(json.dumps(DEFAULT_SETTINGS)),
@@ -376,7 +376,7 @@ async def test_adapter_rejects_invalid_pending_before_broker(monkeypatch: pytest
 def test_normal_planning_registry_and_history_are_unchanged(monkeypatch: pytest.MonkeyPatch, transcript: str) -> None:
     """Normal planning keeps the existing app tools and correlated historical output."""
     observed = install_provider(monkeypatch, [{
-        "type": "function_call", "call_id": "new-call", "namespace": "dj_reachy", "name": "pause_music", "arguments": "{}",
+        "type": "function_call", "call_id": "new-call", "namespace": "dj_reachy_remix", "name": "pause_music", "arguments": "{}",
     }])
     history = [
         {"type": "function_call", "call_id": "old-call", "name": "stop_dance", "arguments": "{}"},

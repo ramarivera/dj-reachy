@@ -6,9 +6,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-import dj_reachy.openai_realtime as rt_mod
-from dj_reachy.openai_realtime import OpenaiRealtimeHandler
-from dj_reachy.tools.core_tools import ToolDependencies
+import dj_reachy_remix.openai_realtime as rt_mod
+from dj_reachy_remix.openai_realtime import OpenaiRealtimeHandler
+from dj_reachy_remix.tools.core_tools import ToolDependencies
 
 
 def _build_handler(loop: asyncio.AbstractEventLoop) -> OpenaiRealtimeHandler:
@@ -33,7 +33,7 @@ def test_format_timestamp_uses_wall_clock() -> None:
 async def test_start_up_retries_on_abrupt_close(monkeypatch: Any, caplog: Any) -> None:
     """Reconnect explicit API sessions after an unexpected transport close."""
     caplog.set_level(logging.WARNING)
-    from dj_reachy.config import config
+    from dj_reachy_remix.config import config
 
     monkeypatch.setattr(config, "VOICE_BACKEND", "api_key")
     monkeypatch.setattr(config, "OPENAI_API_KEY", "explicit-test-fixture")

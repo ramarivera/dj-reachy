@@ -6,10 +6,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-import dj_reachy.subscription_voice as voice
-from dj_reachy.openai_realtime import OpenaiRealtimeHandler
-from dj_reachy.tools.core_tools import ToolDependencies
-from dj_reachy.subscription_voice import subscription_delegation
+import dj_reachy_remix.subscription_voice as voice
+from dj_reachy_remix.openai_realtime import OpenaiRealtimeHandler
+from dj_reachy_remix.tools.core_tools import ToolDependencies
+from dj_reachy_remix.subscription_voice import subscription_delegation
 
 
 @pytest.mark.parametrize("text", [None, 7, [], {}, "\ud800", "x" * 6001, "🌶" * 3001])

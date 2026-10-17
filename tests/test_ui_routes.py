@@ -13,7 +13,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from dj_reachy.openai_realtime import OpenaiRealtimeHandler
+from dj_reachy_remix.openai_realtime import OpenaiRealtimeHandler
 
 
 Dashboard = tuple[TestClient, OpenaiRealtimeHandler, Path]
@@ -22,9 +22,9 @@ Dashboard = tuple[TestClient, OpenaiRealtimeHandler, Path]
 @pytest.fixture
 def dashboard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Dashboard]:
     """Run HTTP and real music controls on separate loops without hardware."""
-    from dj_reachy.config import config
-    from dj_reachy.console import LocalStream
-    from dj_reachy.tools.core_tools import ToolDependencies
+    from dj_reachy_remix.config import config
+    from dj_reachy_remix.console import LocalStream
+    from dj_reachy_remix.tools.core_tools import ToolDependencies
 
     for key in tuple(vars(config)):
         monkeypatch.setattr(config, key, getattr(config, key))
@@ -76,11 +76,11 @@ def test_controls_stop_actual_tool_queue_without_voice_or_provider(dashboard: Da
     """Stop clears actual PCM queued by the active handler."""
     client, handler, _ = dashboard
     handler.output_queue.put_nowait((24000, np.zeros(240, dtype=np.int16)))
-    response = client.post("/api/dj-reachy/music/stop", json={})
+    response = client.post("/api/dj-reachy-remix/music/stop", json={})
     assert response.status_code == 200, response.text
     assert response.json()["status"] == "stopped"
     assert handler.output_queue.empty()
-    assert client.post("/api/dj-reachy/music/unknown", json={}).status_code == 404
+    assert client.post("/api/dj-reachy-remix/music/unknown", json={}).status_code == 404
 
 
 def test_saved_files_reject_symlinks_traversal_and_preserve_external_files(dashboard: Dashboard) -> None:
@@ -106,15 +106,15 @@ def test_saved_files_reject_symlinks_traversal_and_preserve_external_files(dashb
 def test_credentials_are_private_and_never_returned_in_settings(dashboard: Dashboard) -> None:
     """Credential persistence uses 0600 and never returns its value."""
     client, _, home = dashboard
-    response = client.post("/api/dj-reachy/credentials", json={"provider": "elevenlabs", "key": "fixture-secret"})
+    response = client.post("/api/dj-reachy-remix/credentials", json={"provider": "elevenlabs", "key": "fixture-secret"})
     assert response.status_code == 200, response.text
     assert "fixture-secret" not in response.text
     assert (home / ".env").stat().st_mode & 0o777 == 0o600
     assert "fixture-secret" in (home / ".env").read_text()
-    assert "fixture-secret" not in client.get("/api/dj-reachy/settings").text
-    assert "fixture-secret" not in client.get("/api/dj-reachy/status").text
+    assert "fixture-secret" not in client.get("/api/dj-reachy-remix/settings").text
+    assert "fixture-secret" not in client.get("/api/dj-reachy-remix/status").text
     assert (
-        client.post("/api/dj-reachy/credentials", json={"provider": "openai", "key": "bad\nINJECTED=1"}).status_code
+        client.post("/api/dj-reachy-remix/credentials", json={"provider": "openai", "key": "bad\nINJECTED=1"}).status_code
         == 400
     )
 
@@ -131,6 +131,6 @@ def test_generation_rejects_malformed_plans_before_any_provider_work(dashboard: 
         {"prompt": {"nested": "invalid"}},
         {"prompt": "test", "api_key": "fixture-secret"},
     ):
-        response = client.post("/api/dj-reachy/music/generate", json=body)
+        response = client.post("/api/dj-reachy-remix/music/generate", json=body)
         assert response.status_code == 400, response.text
         assert "fixture-secret" not in response.text

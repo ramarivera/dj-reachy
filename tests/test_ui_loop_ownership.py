@@ -6,9 +6,9 @@ from unittest.mock import Mock
 import pytest
 from fastapi import FastAPI
 
-from dj_reachy.main import mount_voice_ui
-from dj_reachy.openai_realtime import OpenaiRealtimeHandler
-from dj_reachy.tools.core_tools import ToolDependencies
+from dj_reachy_remix.main import mount_voice_ui
+from dj_reachy_remix.openai_realtime import OpenaiRealtimeHandler
+from dj_reachy_remix.tools.core_tools import ToolDependencies
 
 
 def test_sync_voice_ui_owns_construction_loops(

@@ -4,7 +4,7 @@ Voice sessions use Python's standard logging stack to emit structured JSONL diag
 
 ## Storage and privacy
 
-The file is `logs/audio-trace.jsonl` under `DJ_REACHY_HOME`. With no override, the home is `dj-reachy` under `XDG_DATA_HOME`, or `~/.local/share/dj-reachy`. On the qualified robot installation this is `/home/pollen/.local/share/dj-reachy/logs/audio-trace.jsonl`.
+The file is `logs/audio-trace.jsonl` under `DJ_REACHY_REMIX_HOME`. With no override, the home is `dj-reachy-remix` under `XDG_DATA_HOME`, or `~/.local/share/dj-reachy-remix`. On the qualified robot installation this is `/home/pollen/.local/share/dj-reachy-remix/logs/audio-trace.jsonl`.
 
 Each file is limited to 1 MiB, with three backups. The log directory is mode `0700` and files are mode `0600`. Diagnostic records also go to stdout. File errors must not stop voice processing. Handlers belong to the voice lifetime and close at shutdown.
 

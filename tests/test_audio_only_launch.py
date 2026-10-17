@@ -7,7 +7,7 @@ import pytest
 
 from reachy_mini import ReachyMini
 from reachy_mini.media.media_manager import MediaBackend, MediaManager
-from dj_reachy import main
+from dj_reachy_remix import main
 
 
 def test_audio_only_initializes_audio_without_camera(monkeypatch: pytest.MonkeyPatch) -> None:

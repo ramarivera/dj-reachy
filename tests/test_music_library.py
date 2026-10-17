@@ -12,10 +12,10 @@ import test_music_lifecycle as lifecycle
 import test_native_audio_responsiveness as native
 
 from reachy_mini import ReachyMini
-import dj_reachy.profiles.dj_reachy.make_song_and_dance as music
-from dj_reachy.config import config
-from dj_reachy.console import LocalStream
-from dj_reachy.openai_realtime import OpenaiRealtimeHandler
+import dj_reachy_remix.profiles.dj_reachy.make_song_and_dance as music
+from dj_reachy_remix.config import config
+from dj_reachy_remix.console import LocalStream
+from dj_reachy_remix.openai_realtime import OpenaiRealtimeHandler
 
 
 actor = lifecycle.actor

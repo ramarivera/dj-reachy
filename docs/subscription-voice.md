@@ -8,18 +8,18 @@ This implementation has offline protocol and real loopback WebRTC qualification.
 
 Run the broker on a machine you trust with your Codex ChatGPT sign-in. It doesn't need Hermes. Use the existing application Python environment, which includes aiortc, AV and HTTPX through the declared dependencies. Don't install anything into a shared environment merely to start the broker.
 
-The following commands use Nushell. Set values through your local secret mechanism, not shell history or settings JSON. `DJ_REACHY_CODEX_AUTH_FILE` is an explicit host-side path to an existing Codex file containing `tokens.access_token` and `tokens.account_id`, with `auth_mode` absent or `chatgpt`. The resolver never searches for credentials, accepts an API-key-only file, reads `OPENAI_API_KEY`, or refreshes tokens. Renew an expired sign-in with Codex on the trusted host. Applications can instead inject a `Callable[[], CodexCredential]` resolver into `BrokerService`.
+The following commands use Nushell. Set values through your local secret mechanism, not shell history or settings JSON. `DJ_REACHY_REMIX_CODEX_AUTH_FILE` is an explicit host-side path to an existing Codex file containing `tokens.access_token` and `tokens.account_id`, with `auth_mode` absent or `chatgpt`. The resolver never searches for credentials, accepts an API-key-only file, reads `OPENAI_API_KEY`, or refreshes tokens. Renew an expired sign-in with Codex on the trusted host. Applications can instead inject a `Callable[[], CodexCredential]` resolver into `BrokerService`.
 
 ```nu
-$env.DJ_REACHY_CODEX_AUTH_FILE = '/explicit/host-only/path/to/codex-auth.json'
-$env.DJ_REACHY_SUBSCRIPTION_BROKER_TOKEN = (input --suppress-output 'Scoped broker token, at least 32 random ASCII characters: ')
-python -m dj_reachy.subscription_broker --host 127.0.0.1 --port 8766
+$env.DJ_REACHY_REMIX_CODEX_AUTH_FILE = '/explicit/host-only/path/to/codex-auth.json'
+$env.DJ_REACHY_REMIX_SUBSCRIPTION_BROKER_TOKEN = (input --suppress-output 'Scoped broker token, at least 32 random ASCII characters: ')
+python -m dj_reachy_remix.subscription_broker --host 127.0.0.1 --port 8766
 ```
 
 The default listener is loopback. Every session and planning request requires that dedicated bearer token, including loopback requests. Don't reuse a provider credential as the broker token. A remote listener requires TLS directly:
 
 ```nu
-python -m dj_reachy.subscription_broker --host 0.0.0.0 --port 8766 --tls-cert /host/cert.pem --tls-key /host/key.pem
+python -m dj_reachy_remix.subscription_broker --host 0.0.0.0 --port 8766 --tls-cert /host/cert.pem --tls-key /host/key.pem
 ```
 
 Use a trusted certificate and firewall the listener to approved clients. The token authorizes subscription voice sessions and bounded app planning. It doesn't grant shell, filesystem, arbitrary upstream HTTP, credential retrieval or general agent execution. Rotate it on both sides to revoke clients. The broker accepts at most four concurrent operations. It doesn't follow redirects or use environment HTTP proxies. Bodies are capped at 256 KiB, SDP at 64 KiB, planner history at 128 KiB and SSE responses at 512 KiB.
@@ -27,8 +27,8 @@ Use a trusted certificate and firewall the listener to approved clients. The tok
 On the app client, set only the broker URL and scoped broker token. Never copy the host's Codex auth file or OAuth/account credentials to the robot:
 
 ```nu
-$env.DJ_REACHY_SUBSCRIPTION_BROKER_URL = 'https://trusted-host.example:8766/session'
-$env.DJ_REACHY_SUBSCRIPTION_BROKER_TOKEN = (input --suppress-output 'Scoped broker token: ')
+$env.DJ_REACHY_REMIX_SUBSCRIPTION_BROKER_URL = 'https://trusted-host.example:8766/session'
+$env.DJ_REACHY_REMIX_SUBSCRIPTION_BROKER_TOKEN = (input --suppress-output 'Scoped broker token: ')
 ```
 
 For a client on the broker host, `http://127.0.0.1:8766/session` is allowed. Non-loopback HTTP, URL credentials, query parameters, fragments and token whitespace are rejected. Environment variables are intentionally separate from persisted voice/music/motion settings.
@@ -38,10 +38,10 @@ For a client on the broker host, `http://127.0.0.1:8766/session` is allowed. Non
 Run this only when the account owner has authorized a session. It makes exactly one broker session POST, which makes exactly one consumer session POST. There are no retries, greeting requests, recording devices, speakers, motion commands or planner calls. WebRTC sends a synthetic silence track, receives media into memory and closes immediately after `session.started`.
 
 ```nu
-python -m dj_reachy.subscription_voice --qualify
+python -m dj_reachy_remix.subscription_voice --qualify
 ```
 
-The equivalent async function is `await dj_reachy.subscription_voice.qualify_subscription()`. Success returns:
+The equivalent async function is `await dj_reachy_remix.subscription_voice.qualify_subscription()`. Success returns:
 
 ```json
 {"ok": true, "auth": "subscription", "handshakes": 1, "recording": false, "playback": false}
@@ -93,7 +93,7 @@ The client associates `input_transcript.added`, user `turn.done`, and client `de
 Full anchored stop/pause/resume requests bypass planning, and user `turn.done` can invoke them before a delegation arrives. An earlier pause isn't included in a later resume request. Cancellation invalidates work before a delayed result can restart playback or speak through a replacement connection.
 
 
-General requests, including "sing me a ten-second salsa about robots", use the broker's subscription-backed Codex Responses planner at `https://chatgpt.com/backend-api/codex/responses`. `DJ_REACHY_SUBSCRIPTION_PLANNER_MODEL` on the host selects its model, default `gpt-6.1-sol`. There is no API-key planner fallback. Requests use `store: false`, `stream: true`, full per-request history and a `dj_reachy` function namespace. Only completed SSE responses can authorize commands. Tool call IDs and encrypted reasoning/history survive stateless tool rounds.
+General requests, including "sing me a ten-second salsa about robots", use the broker's subscription-backed Codex Responses planner at `https://chatgpt.com/backend-api/codex/responses`. `DJ_REACHY_REMIX_SUBSCRIPTION_PLANNER_MODEL` on the host selects its model, default `gpt-6.1-sol`. There is no API-key planner fallback. Requests use `store: false`, `stream: true`, full per-request history and a `dj_reachy_remix` function namespace. Only completed SSE responses can authorize commands. Tool call IDs and encrypted reasoning/history survive stateless tool rounds.
 
 The fixed registry permits `make_song_and_dance`, `play_saved_song`, `pause_music`, `resume_music`, `stop_music`, `dance` and `stop_dance`. Arguments are validated at the broker and client. Song duration is 3000 to 600000 ms; unspecified duration uses the app music setting rather than a hardcoded 30 seconds. Replay needs an exact known filename. Dance repeat is bounded to four and move names are allowlisted. Each delegation has at most four planner rounds and six tool calls. Unsupported requests need clarification, not shell or file access.
 
@@ -103,7 +103,7 @@ Canceling a local coroutine doesn't prove that an upstream paid generation stopp
 
 ## Offline verification
 
-The voice tests require no credentials and use explicit loopback fixtures. Use an owned sandbox for HOME, DJ_REACHY_HOME, TMPDIR, XDG roots, HF_HOME and caches, strip provider credentials, and set `HF_HUB_OFFLINE=1`, `GRADIO_ANALYTICS_ENABLED=False`, and `PYTHONPATH` to the current worktree's `src`.
+The voice tests require no credentials and use explicit loopback fixtures. Use an owned sandbox for HOME, DJ_REACHY_REMIX_HOME, TMPDIR, XDG roots, HF_HOME and caches, strip provider credentials, and set `HF_HUB_OFFLINE=1`, `GRADIO_ANALYTICS_ENABLED=False`, and `PYTHONPATH` to the current worktree's `src`.
 
 ```nu
 python -m pytest -q tests/test_subscription_voice.py tests/test_subscription_broker.py tests/test_voice_execution.py tests/test_openai_realtime.py
@@ -115,13 +115,13 @@ Coverage includes actual aiortc negotiation, bidirectional PCM with real AV fram
 
 The ChatGPT consumer endpoint and event dialect aren't a stable public third-party API contract. Matching Conduit's implementation doesn't guarantee that an account has ChatGPT Live access. Public Sign in with ChatGPT Responses support excludes audio and isn't proof of consumer Live entitlement. This adapter fails closed on billing mismatches, rejected signaling, incomplete SSE and invalid commands. Protocol changes require another source review and qualification.
 
-Conduit source revisions, attribution and the complete MIT notice ship in [`src/dj_reachy/static/conduit-voice-NOTICE.txt`](../src/dj_reachy/static/conduit-voice-NOTICE.txt). The Codex Responses request shape was checked against [openai/codex revision 922510f4d7570b42838e015787ed53abfa8761a1](https://github.com/openai/codex/tree/922510f4d7570b42838e015787ed53abfa8761a1/codex-rs/codex-api/src), especially `common.rs` and `endpoint/responses.rs`. The upstream Apache 2.0 license is unchanged.
+Conduit source revisions, attribution and the complete MIT notice ship in [`src/dj_reachy_remix/static/conduit-voice-NOTICE.txt`](../src/dj_reachy_remix/static/conduit-voice-NOTICE.txt). The Codex Responses request shape was checked against [openai/codex revision 922510f4d7570b42838e015787ed53abfa8761a1](https://github.com/openai/codex/tree/922510f4d7570b42838e015787ed53abfa8761a1/codex-rs/codex-api/src), especially `common.rs` and `endpoint/responses.rs`. The upstream Apache 2.0 license is unchanged.
 
 
 ## Ordinary launches outside a test harness
 
-The robot's application-home `.env` must provide `DJ_REACHY_SUBSCRIPTION_BROKER_URL` and `DJ_REACHY_SUBSCRIPTION_BROKER_TOKEN`. The main app loads this file before opening voice. Keep it private and use only the scoped broker client credential, never the account's OAuth material. Leave the installed package's legacy provider `.env` unchanged.
+The robot's application-home `.env` must provide `DJ_REACHY_REMIX_SUBSCRIPTION_BROKER_URL` and `DJ_REACHY_REMIX_SUBSCRIPTION_BROKER_TOKEN`. The main app loads this file before opening voice. Keep it private and use only the scoped broker client credential, never the account's OAuth material. Leave the installed package's legacy provider `.env` unchanged.
 
-`deployment/run_broker.py` bridges a systemd `broker-token` credential into the ordinary broker CLI. `deployment/dj-reachy-subscription-broker.service` runs the host-owned virtual environment and bridge with a loopback-only listener on port 18766. Install the bridge under the host broker directory and the service in the user's systemd directory. The existing private SSH forward carries robot loopback requests to that host listener. Do not run the exhausted test-budget broker and the ordinary broker on the same port.
+`deployment/run_broker.py` bridges a systemd `broker-token` credential into the ordinary broker CLI. `deployment/dj-reachy-remix-subscription-broker.service` runs the host-owned virtual environment and bridge with a loopback-only listener on port 18766. Install the bridge under the host broker directory and the service in the user's systemd directory. The existing private SSH forward carries robot loopback requests to that host listener. Do not run the exhausted test-budget broker and the ordinary broker on the same port.
 
 The ordinary broker is idle until a client requests a session or plan. Starting it does not start robot capture or playback. It is not enabled at login by this setup. An application launch remains an explicit action. Keep test request caps in a separate disposable test broker and ledger; never reset a consumed ledger to make the ordinary app work.

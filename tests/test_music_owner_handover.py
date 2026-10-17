@@ -15,10 +15,10 @@ from fastrtc import audio_to_float32
 from numpy.typing import NDArray
 
 from reachy_mini import ReachyMini
-from dj_reachy.console import LocalStream
-from dj_reachy.openai_realtime import OpenaiRealtimeHandler
-from dj_reachy.tools.core_tools import ToolDependencies
-from dj_reachy.audio.streaming_pcm import StreamingPCMConverter
+from dj_reachy_remix.console import LocalStream
+from dj_reachy_remix.openai_realtime import OpenaiRealtimeHandler
+from dj_reachy_remix.tools.core_tools import ToolDependencies
+from dj_reachy_remix.audio.streaming_pcm import StreamingPCMConverter
 
 
 class HandoverMedia:
@@ -241,7 +241,7 @@ def test_failed_clear_propagates_without_claiming_new_owner(previous_owner: str 
 @pytest.mark.asyncio
 async def test_already_drained_ready_notice_keeps_its_complete_tail(monkeypatch: pytest.MonkeyPatch) -> None:
     """The real ready-notice fence finishes speech before the new-owner clear."""
-    from dj_reachy.openai_realtime import voice_config
+    from dj_reachy_remix.openai_realtime import voice_config
 
     monkeypatch.setattr(voice_config, "VOICE_BACKEND", "subscription")
     media = HandoverMedia()

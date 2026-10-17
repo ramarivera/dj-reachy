@@ -1,5 +1,5 @@
 ---
-title: DJ Reachy
+title: DJ Reachy Remix
 emoji: 🎧
 colorFrom: red
 colorTo: blue
@@ -11,11 +11,25 @@ tags:
   - reachy_mini_python_app
 ---
 
-# DJ Reachy
+# DJ Reachy Remix
 
-A standalone derivative of [mzurki/dj-reachy](https://huggingface.co/spaces/mzurki/dj-reachy). It preserves the upstream Apache 2.0 history, `dj-reachy` CLI, `dj_reachy` app-manager ID and local audio-reactive dance engine.
+A standalone derivative of [mzurki/dj-reachy](https://huggingface.co/spaces/mzurki/dj-reachy). It preserves the upstream Apache 2.0 history and local audio-reactive dance engine, with a separate release identity so it can be installed alongside vanilla DJ Reachy.
 
 The control panel separates conversation and personality, Eleven Music generation, and bounded local motion. Saved tracks can be listed, previewed, replayed without regeneration, and deleted. Pause, resume and stop use the same music tools as the voice handler.
+
+## Separate fork identity
+
+| Identity | Vanilla DJ Reachy | DJ Reachy Remix |
+| --- | --- | --- |
+| Python distribution / CLI | `dj-reachy` | `dj-reachy-remix` |
+| Python import namespace | `dj_reachy` | `dj_reachy_remix` |
+| Reachy app-manager slug | `dj_reachy` | `dj_reachy_remix` |
+
+Remix stores settings, provider configuration, instructions and saved tracks under `~/.local/share/dj-reachy-remix`, or `$XDG_DATA_HOME/dj-reachy-remix`. `DJ_REACHY_REMIX_HOME` overrides that root. It deliberately ignores the old `DJ_REACHY_HOME` selector and ships no `dj_reachy` import or console compatibility alias. Default model-cache storage is separate too. Provider model IDs and the host-owned subscription authorization flow are unchanged.
+
+Both apps can be installed, but the SDK app manager still gives one app control of the robot at a time. Their hardware and settings server are not intended to run concurrently. The GitHub repository remains `ramarivera/dj-reachy`; changing the release identity does not rename the repository.
+
+Earlier development builds of this fork used vanilla's package identity. Do not remove an installed `dj-reachy` package assuming it is the fork. Install Remix separately, inspect the app-manager entries, and restore or update vanilla from its canonical source only when intended. Remix does not automatically copy or modify the old application's data. If you need data from an earlier fork build, explicitly copy only the settings, instructions and tracks you own into the Remix home, then configure its credentials separately.
 
 ## Install and configure
 
@@ -24,7 +38,7 @@ Python 3.10 or later and the Reachy Mini SDK are required. Music playback also r
 Configure without connecting to a robot, recording a microphone, or contacting a provider:
 
 ```nu
-dj-reachy --settings-only
+dj-reachy-remix --settings-only
 ```
 
 Open <http://127.0.0.1:7860/>. The default voice backend is ChatGPT subscription Live. Missing subscription configuration never selects API-key billing. Subscription access and the consumer Live endpoint's account entitlement require a separate authorized qualification check. UI construction or a configured key doesn't prove access.
@@ -32,7 +46,7 @@ Open <http://127.0.0.1:7860/>. The default voice backend is ChatGPT subscription
 To explicitly select OpenAI API-key Realtime and reset the subscription model/voice defaults:
 
 ```nu
-dj-reachy --settings-only --voice-backend api_key
+dj-reachy-remix --settings-only --voice-backend api_key
 ```
 
 Save the OpenAI key under Provider credentials. Save an ElevenLabs key there for music generation. Keys aren't returned by the settings API or embedded in the Gradio config. They are separate from the nonsecret JSON settings.
@@ -53,10 +67,10 @@ These commands connect to the robot and may record audio, play speakers and star
 
 ```nu
 # Browser microphone and Gradio conversation at /voice; controls remain at /
-dj-reachy --gradio
+dj-reachy-remix --gradio
 
 # Headless robot microphone/speaker loop; controls at /
-dj-reachy
+dj-reachy-remix
 ```
 
 The app-manager entry point uses the SDK's existing settings server. The standalone CLI starts its own loopback server. `--gradio` exposes the same shared control panel inside the voice page, not a second music executor. Stop remains usable while a long generation/replay HTTP request is running.
@@ -77,8 +91,8 @@ Run tests in an isolated app home with no real credentials. Set `PYTHONPATH` to 
 
 ```nu
 pytest -q
-ruff check src/dj_reachy/runtime_settings.py src/dj_reachy/config.py src/dj_reachy/gradio_dj_ui.py src/dj_reachy/console.py src/dj_reachy/main.py src/dj_reachy/prompts.py
-mypy src/dj_reachy/runtime_settings.py src/dj_reachy/config.py src/dj_reachy/gradio_dj_ui.py src/dj_reachy/console.py src/dj_reachy/main.py src/dj_reachy/prompts.py
+ruff check src/dj_reachy_remix/runtime_settings.py src/dj_reachy_remix/config.py src/dj_reachy_remix/gradio_dj_ui.py src/dj_reachy_remix/console.py src/dj_reachy_remix/main.py src/dj_reachy_remix/prompts.py
+mypy src/dj_reachy_remix/runtime_settings.py src/dj_reachy_remix/config.py src/dj_reachy_remix/gradio_dj_ui.py src/dj_reachy_remix/console.py src/dj_reachy_remix/main.py src/dj_reachy_remix/prompts.py
 ```
 
 ## License

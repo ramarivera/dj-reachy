@@ -15,7 +15,7 @@ def records(path: Path) -> list[dict[str, object]]:
 
 def test_audio_metrics_rate_limit_changes_and_run_summary(tmp_path: Path) -> None:
     """Keep totals even while suppressing repeated frames, not silent transitions."""
-    from dj_reachy.audio_diagnostics import AudioDiagnostics
+    from dj_reachy_remix.audio_diagnostics import AudioDiagnostics
 
     now = [10.0]
     trace = AudioDiagnostics(home=tmp_path, clock=lambda: now[0])
@@ -53,12 +53,12 @@ def test_private_rotating_file_accepts_only_diagnostics(tmp_path: Path, capsys: 
     """Bound persistence, restrict permissions, and exclude arbitrary provider fields."""
     import logging
 
-    from dj_reachy.audio_diagnostics import AudioDiagnostics
+    from dj_reachy_remix.audio_diagnostics import AudioDiagnostics
 
     trace = AudioDiagnostics(home=tmp_path, max_bytes=2048, backups=2)
     trace.start()
     secret = "SECRET prompt transcript bearer sdp provider-error-body"
-    logging.getLogger("dj_reachy.subscription_voice").warning(secret)
+    logging.getLogger("dj_reachy_remix.subscription_voice").warning(secret)
     for _ in range(100):
         trace.provider_event(secret)
         trace.lifecycle("tool", "started", name=secret)
@@ -91,11 +91,11 @@ async def test_synthetic_console_handler_track_path_keeps_channel_selection(
     from numpy.typing import NDArray
 
     from reachy_mini import ReachyMini
-    from dj_reachy.console import LocalStream
-    from dj_reachy.voice_media import MicrophoneTrack
-    from dj_reachy.openai_realtime import OpenaiRealtimeHandler
-    from dj_reachy.tools.core_tools import ToolDependencies
-    from dj_reachy.subscription_voice import SubscriptionRealtimeAdapter
+    from dj_reachy_remix.console import LocalStream
+    from dj_reachy_remix.voice_media import MicrophoneTrack
+    from dj_reachy_remix.openai_realtime import OpenaiRealtimeHandler
+    from dj_reachy_remix.tools.core_tools import ToolDependencies
+    from dj_reachy_remix.subscription_voice import SubscriptionRealtimeAdapter
 
     app = OpenaiRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
     app.diagnostics.home = tmp_path
@@ -181,10 +181,10 @@ async def test_drop_reasons_and_track_backlog_are_counted(tmp_path: Path) -> Non
     from types import SimpleNamespace
     from unittest.mock import MagicMock
 
-    from dj_reachy.voice_media import MicrophoneTrack
-    from dj_reachy.openai_realtime import OpenaiRealtimeHandler
-    from dj_reachy.tools.core_tools import ToolDependencies
-    from dj_reachy.subscription_voice import SubscriptionRealtimeAdapter
+    from dj_reachy_remix.voice_media import MicrophoneTrack
+    from dj_reachy_remix.openai_realtime import OpenaiRealtimeHandler
+    from dj_reachy_remix.tools.core_tools import ToolDependencies
+    from dj_reachy_remix.subscription_voice import SubscriptionRealtimeAdapter
 
     app = OpenaiRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
     app.diagnostics.home = tmp_path
@@ -233,9 +233,9 @@ async def test_real_handler_planner_tool_lifecycle_never_logs_payloads(
     from types import SimpleNamespace
     from unittest.mock import MagicMock
 
-    import dj_reachy.openai_realtime as realtime
-    from dj_reachy.openai_realtime import OpenaiRealtimeHandler
-    from dj_reachy.tools.core_tools import ToolDependencies
+    import dj_reachy_remix.openai_realtime as realtime
+    from dj_reachy_remix.openai_realtime import OpenaiRealtimeHandler
+    from dj_reachy_remix.tools.core_tools import ToolDependencies
 
     secret = "PRIVATE transcript prompt payload credentials sdp header failure"
     app = OpenaiRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
@@ -308,8 +308,8 @@ async def test_close_failure_still_releases_owned_diagnostic_task_and_handlers(t
 
     from aiortc import RTCConfiguration, RTCPeerConnection
 
-    from dj_reachy.voice_media import MicrophoneTrack
-    from dj_reachy.subscription_voice import SubscriptionRealtimeAdapter
+    from dj_reachy_remix.voice_media import MicrophoneTrack
+    from dj_reachy_remix.subscription_voice import SubscriptionRealtimeAdapter
 
     class BrokenChannel:
         readyState = "open"
@@ -339,7 +339,7 @@ async def test_close_failure_still_releases_owned_diagnostic_task_and_handlers(t
 
 def test_summary_separates_nonzero_progress_from_paced_silence(tmp_path: Path) -> None:
     """Track-generated silence must not hide the boundary where real input energy vanished."""
-    from dj_reachy.audio_diagnostics import AudioDiagnostics
+    from dj_reachy_remix.audio_diagnostics import AudioDiagnostics
 
     trace = AudioDiagnostics(home=tmp_path)
     trace.start()
@@ -356,20 +356,20 @@ def test_summary_separates_nonzero_progress_from_paced_silence(tmp_path: Path) -
 
 
 def test_default_diagnostic_root_matches_app_xdg_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep unset DJ_REACHY_HOME diagnostics alongside the rest of the app's state."""
-    from dj_reachy.audio_diagnostics import AudioDiagnostics
+    """Keep unset DJ_REACHY_REMIX_HOME diagnostics alongside the rest of the app's state."""
+    from dj_reachy_remix.audio_diagnostics import AudioDiagnostics
 
-    monkeypatch.delenv("DJ_REACHY_HOME", raising=False)
+    monkeypatch.delenv("DJ_REACHY_REMIX_HOME", raising=False)
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
     trace = AudioDiagnostics()
     trace.start()
     trace.close()
-    assert (tmp_path / "dj-reachy" / "logs" / "audio-trace.jsonl").exists()
+    assert (tmp_path / "dj-reachy-remix" / "logs" / "audio-trace.jsonl").exists()
 
 
 def test_symlinked_diagnostic_targets_are_refused(tmp_path: Path) -> None:
     """Never follow log-file or log-directory symlinks into another private state file."""
-    from dj_reachy.audio_diagnostics import AudioDiagnostics
+    from dj_reachy_remix.audio_diagnostics import AudioDiagnostics
 
     victim = tmp_path / "private-state"
     victim.write_text("DO NOT TOUCH")
@@ -395,7 +395,7 @@ def test_symlinked_diagnostic_targets_are_refused(tmp_path: Path) -> None:
 
 def test_stats_and_alternating_audio_are_bounded_without_losing_totals(tmp_path: Path) -> None:
     """Rate limiting must not let rapid silence/format changes flood either sink."""
-    from dj_reachy.audio_diagnostics import AudioDiagnostics
+    from dj_reachy_remix.audio_diagnostics import AudioDiagnostics
 
     now = [0.0]
     trace = AudioDiagnostics(home=tmp_path, clock=lambda: now[0])
@@ -430,7 +430,7 @@ def test_stats_and_alternating_audio_are_bounded_without_losing_totals(tmp_path:
 
 def test_diagnostics_io_failure_does_not_escape(tmp_path: Path) -> None:
     """An unwritable diagnostic root must not break the audio path."""
-    from dj_reachy.audio_diagnostics import AudioDiagnostics
+    from dj_reachy_remix.audio_diagnostics import AudioDiagnostics
 
     blocked = tmp_path / "blocked"
     blocked.write_text("not a directory")
@@ -448,9 +448,9 @@ async def test_conversion_failure_records_the_failed_boundary_without_error_payl
     """Keep a known conversion exception visible without changing the audio contract."""
     from unittest.mock import MagicMock
 
-    from dj_reachy.openai_realtime import OpenaiRealtimeHandler
-    from dj_reachy.tools.core_tools import ToolDependencies
-    from dj_reachy.subscription_voice import SubscriptionRealtimeAdapter
+    from dj_reachy_remix.openai_realtime import OpenaiRealtimeHandler
+    from dj_reachy_remix.tools.core_tools import ToolDependencies
+    from dj_reachy_remix.subscription_voice import SubscriptionRealtimeAdapter
 
     app = OpenaiRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
     app.diagnostics.home = tmp_path
