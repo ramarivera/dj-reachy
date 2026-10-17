@@ -5,7 +5,7 @@ import copy
 import json
 import socket
 import importlib.util
-from typing import Any
+from typing import Any, cast
 from dataclasses import FrozenInstanceError
 
 import pytest
@@ -53,7 +53,7 @@ def test_prepare_freezes_expanded_request_without_activating() -> None:
     exposed["positive_styles"].append("mutated")
     assert draft.arguments == expected
     with pytest.raises(FrozenInstanceError):
-        draft.id = "replacement"
+        setattr(draft, "id", "replacement")
     assert "private" not in repr(draft)
     assert "actual user's request" not in repr(draft)
     assert "private" not in repr(gate)
@@ -84,7 +84,7 @@ def test_pending_payload_is_exact_bounded_detached_rpc_data() -> None:
     assert len(json.dumps(payload).encode()) <= 65536
     for invalid in (["x"] * 5, ["é" * 4097], ["\ud800"], [1], "not a list"):
         with pytest.raises(ValueError, match="confirmation"):
-            draft.pending_payload(invalid)
+            draft.pending_payload(cast(list[str], invalid))
 
 
 @pytest.mark.parametrize("reply", ["Haz exactamente esa canción", "それでお願いします", "no fixed approval phrase"])
@@ -724,11 +724,13 @@ def test_explicit_source_overrides_survive_new_defaults() -> None:
     original = gate.prepare(source, settings, original_turn=1, original_user_text="my actual request")
     gate.offer(original, epoch=0, presented_turn=1)
     ticket = gate.begin_reply(turn=2, text="the request", epoch=0)
+    assert ticket is not None
     settings["music"].update(duration_ms=60000, positive_styles=["cold"], model_id="music_v2")
     result = gate.apply(
         ticket, {"decision": "approve", "arguments": None, "text": ""}, epoch=0, current_turn=2, settings=settings
     )
     assert result.kind == "revised" and result.arguments is None
+    assert result.draft is not None
     assert result.draft.arguments == validate_generation_request(source, settings)
     assert result.draft.arguments["positive_styles"] == ["warm"]
     assert result.draft.arguments["music_length_ms"] == 10000

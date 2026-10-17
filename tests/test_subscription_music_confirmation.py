@@ -67,6 +67,7 @@ class WireHarness:
             payload = json.loads(request.content)
             self.upstream.append(payload)
             confirmation = payload["tools"][0].get("tools", [{}])[0].get("name") == "music_confirmation_decision"
+            output: list[dict[str, Any]]
             if confirmation:
                 output = [
                     {
@@ -627,6 +628,7 @@ async def test_expiry_uses_real_domain_lifetime(wire: WireHarness, during: bool)
         await asyncio.wait_for(wire.classifying.wait(), 1)
     clock[0] = 90.0
     if during:
+        assert wire.classifier_release is not None
         wire.classifier_release.set()
     else:
         await wire.user("Go ahead")
@@ -1069,7 +1071,7 @@ async def test_current_owner_works_without_python311_task_cancelling(wire: WireH
     legacy_owner = SimpleNamespace(cancelled=lambda: False)
     current = False
     with monkeypatch.context() as patcher:
-        patcher.setattr(realtime.asyncio, "current_task", lambda: legacy_owner)
+        patcher.setattr(asyncio, "current_task", lambda: legacy_owner)
         try:
             current = wire.app._current(wire.connection, wire.app._work_epoch)
         except AttributeError:
