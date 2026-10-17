@@ -25,3 +25,16 @@ def test_zero_music_intensity_really_disables_offsets(monkeypatch: pytest.Monkey
         assert offsets and all(values == ((0.0,) * 6, (0.0, 0.0), 0.0) for values in offsets)
     finally:
         dancer.stop()
+
+
+def test_stereo_analysis_preserves_fractional_channel_mean_without_mutating_pcm() -> None:
+    """Keep the existing floating downmix instead of quantizing back to int16."""
+    from dj_reachy.audio.music_dancer import AudioAnalyzer
+
+    stereo = np.array([[0, 2, 4, 6], [1, 3, 5, 7]], dtype=np.int16)
+    before = stereo.copy()
+    normalized = np.mean(stereo, axis=0).astype(np.float32) / 32768.0
+    expected_rms = min(float(np.sqrt(np.mean(normalized**2))) * 10, 1.0)
+    features = AudioAnalyzer(chunk_size=4).analyze(stereo)
+    assert features.rms == expected_rms
+    np.testing.assert_array_equal(stereo, before)

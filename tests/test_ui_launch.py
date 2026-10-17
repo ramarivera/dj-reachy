@@ -2,8 +2,10 @@
 from __future__ import annotations
 import time
 import asyncio
+import inspect
 import threading
 from types import SimpleNamespace
+from typing import Any
 from pathlib import Path
 from argparse import Namespace
 from unittest.mock import Mock
@@ -34,9 +36,17 @@ def test_managed_launch_uses_user_home_not_sdk_instance(tmp_path: Path, monkeypa
     from dj_reachy.audio import head_wobbler
     from dj_reachy.config import config
 
-    status = DaemonStatus(robot_name="fixture", state=DaemonState.RUNNING,
-                          wireless_version=False, desktop_app_daemon=False,
-                          stream_enabled=False, simulation_enabled=False, backend_status=None)
+    status_fields: dict[str, Any] = {
+        "robot_name": "fixture", "state": DaemonState.RUNNING,
+        "wireless_version": False, "desktop_app_daemon": False,
+        "stream_enabled": False, "simulation_enabled": False, "backend_status": None,
+    }
+    # Construct the real SDK model in both supported dependency stacks. The
+    # newer SDK requires this field; the older SDK uses a dataclass without it.
+    if "mockup_sim_enabled" in inspect.signature(DaemonStatus).parameters:
+        status_fields["mockup_sim_enabled"] = False
+    status = DaemonStatus(**status_fields)
+    assert isinstance(status, DaemonStatus)
     robot = SimpleNamespace(
         client=SimpleNamespace(get_status=lambda: status, disconnect=Mock()), media=Mock(),
         get_current_head_pose=lambda: np.eye(4), enable_motors=Mock(), wake_up=Mock(),
@@ -82,6 +92,11 @@ def test_cli_parser_and_sdk_app_delegate(monkeypatch: pytest.MonkeyPatch) -> Non
     assert not unknown
     call = Mock()
     monkeypatch.setattr(main, "run", call)
+    # SDK 1.12 discovers its daemon during construction. This CLI delegation
+    # fixture owns that boundary and must never contact a real local service.
+    for method in ("_check_daemon_on_localhost", "_check_systemd_service_exists"):
+        if hasattr(main.ReachyMiniConversationApp, method):
+            monkeypatch.setattr(main.ReachyMiniConversationApp, method, lambda _self: False)
     app = main.ReachyMiniConversationApp()
     app.run(Mock(), threading.Event())
     assert call.call_args.kwargs["settings_app"] is app.settings_app

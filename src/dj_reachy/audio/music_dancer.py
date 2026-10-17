@@ -112,9 +112,8 @@ class AudioAnalyzer:
 
         """
         # Convert to float and handle stereo -> mono
-        if audio.ndim == 2:
-            audio = np.mean(audio, axis=0)
-        audio_float = audio.astype(np.float32) / 32768.0
+        audio_mono = np.mean(audio, axis=0) if audio.ndim == 2 else audio
+        audio_float = audio_mono.astype(np.float32) / 32768.0
 
         current_time = time.monotonic() - self.start_time
 
