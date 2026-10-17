@@ -37,6 +37,16 @@ dj-reachy --settings-only --voice-backend api_key
 
 Save the OpenAI key under Provider credentials. Save an ElevenLabs key there for music generation. Keys aren't returned by the settings API or embedded in the Gradio config. They are separate from the nonsecret JSON settings.
 
+## Subscription music confirmation
+
+Subscription Live carries the spoken conversation. A genuine Live delegation starts unbilled preparation of a music draft, not generation. The app returns the complete request and duration for a preview, then sends only replies to that pending draft to the subscription planner for semantic confirmation, correction or refusal. A second Live delegation and a fixed approval phrase aren't required. Ordinary conversation without a pending draft doesn't trigger this extra planning.
+
+Approval consumes the frozen request once. Corrections or changed music settings require another preview and a fresh reply. A draft lasts at most 90 seconds and four assessed reply turns across corrections. Refusal, stop and disconnect discard it; stale approval can't revive it. Silence and assistant narration never authorize music generation.
+
+This flow uses additional subscription planner calls while a draft awaits a reply. It doesn't replace Live speech with a transcript-to-TTS pipeline or select API-key billing. Explicit local UI/API generation and the separately selected API-key Realtime backend keep their existing paths.
+
+Offline tests can check state, transport and cancellation with synthetic fixtures. They don't establish real-model consent interpretation or reliable integrated robot operation; those need separately authorized live qualification.
+
 ## Run with an authorized robot
 
 These commands connect to the robot and may record audio, play speakers and start motion services. Run them only when those actions are authorized.

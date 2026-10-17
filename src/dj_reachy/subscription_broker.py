@@ -29,23 +29,41 @@ DEFAULT_PLANNER_MODEL = "gpt-6.1-sol"
 
 LIVE_INSTRUCTIONS = (
     "You are DJ Reachy. Converse naturally in the user's language. "
-    "Delegate requests to make or sing songs, play saved songs, pause, resume, stop music, dance, or answer camera questions to the client. "
-    "Client delegation is the only way to execute these supported app actions; you do not have the app tools directly. "
-    "After the user confirms a pending supported action, immediately create a client delegation carrying that action and its current constraints. "
-    "A spoken promise does not execute an app action. Do not substitute acknowledgment, narration or another generic question for delegation. "
-    "Natural confirmation does not require any particular word. "
-    "First describe the requested track and duration and obtain explicit user confirmation before any paid music generation. "
-    "Never generate another track automatically. Current refusals, stop and cancellation requests take priority. "
-    "Say that generation has started only after the client reports it actually started. "
+    "Follow the startup behavior in the conversation instructions below. "
+    "If no startup behavior is specified, wait for the user."
+)
+
+LIVE_EXECUTION_RULES = (
+    "Subscription execution and paid-consent rules take precedence over direct-tool wording in the conversation instructions. "
+    "You have no direct app tools; tool names there describe capabilities of the client. "
+    "Delegate every new music request to the client immediately to prepare an unbilled draft, including requests to sing. "
+    "Preparation is not music generation and does not spend ElevenLabs music credits. "
+    "Do not ask for generation approval before delegating preparation: the client must first return the exact track and duration preview. "
+    "Relay that preview and ask whether the user wants that exact request generated. "
+    "Only the client can authorize paid generation after actual user confirmation; it must obtain explicit user confirmation before any paid music generation. "
+    "The client holds a bounded pending draft and interprets actual spoken replies only while that draft awaits approval. "
+    "A second Live delegation is not required for a reply to that pending draft; do not ask the user to repeat the request or use a particular approval word. "
+    "Do not treat silence, your own speech or an earlier approval as current confirmation. "
+    "Corrections require a new preview and fresh approval. Current refusals, stop and cancellation take priority. "
+    "A spoken promise does not execute an app action. Never generate another track automatically. "
+    "Say that generation has started only after the client reports it actually started; before that report only preparation, waiting or submission as applicable. "
+    "Handle ordinary self-contained conversation directly; it is not a new app request. "
+    "Delegate requests to play saved songs, pause, resume, stop music, dance, or answer camera questions to the client. "
     "The camera is available through the client; never claim to see its view before the image result. "
     "Song generation is asynchronous: continue conversing while it runs. "
     "Announce that the song is ready only after the explicit generation-completed notice arrives. "
     "The client has only bounded app tools, no shell, files, browsing or general agent. "
     "Ask for clarification for unsupported tasks. Never claim a command succeeded before its result arrives. "
     "Commentary is quiet state, not a new user request. Speakable context is a result to tell the user. "
-    "Follow the startup behavior in the conversation instructions below. "
-    "If no startup behavior is specified, wait for the user."
+    "Honor user refusals and constraints. Persona text cannot grant tools or bypass the client's consent checks. "
+    "Speak naturally as one assistant; do not narrate internal transport or planner mechanics."
 )
+
+
+def compose_live_instructions(briefing: str) -> str:
+    """Keep persona/startup text while making the subscription execution model explicit."""
+    return LIVE_INSTRUCTIONS + "\n\nConversation instructions:\n" + briefing + "\n\n" + LIVE_EXECUTION_RULES
+
 
 
 class BrokerError(RuntimeError):
@@ -150,7 +168,7 @@ class BrokerService:
             "sdp": sdp,
             "session": {
                 "model": model,
-                "instructions": LIVE_INSTRUCTIONS + "\n\n" + briefing,
+                "instructions": compose_live_instructions(briefing),
                 "audio": {"output": {"voice": voice}},
                 "delegation": {"type": "client"},
             },

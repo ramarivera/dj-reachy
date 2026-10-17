@@ -87,7 +87,7 @@ def test_broker_auth_contains_credentials_and_preserves_consumer_contract() -> N
                 assert "Do not greet first." not in request["session"]["instructions"]
                 # This checks wire delivery, not whether the voice model obeys it.
                 assert (
-                    "After the user confirms a pending supported action, immediately create a client delegation"
+                    "Delegate every new music request to the client immediately to prepare an unbilled draft"
                     in request["session"]["instructions"]
                 )
                 assert "A spoken promise does not execute an app action." in request["session"]["instructions"]
@@ -350,3 +350,41 @@ def test_broker_planner_defaults_to_supported_subscription_model(
     with pytest.raises(CapturedServer):
         broker.main()
     assert observed == [override or "gpt-6.1-sol"]
+
+
+def test_subscription_session_uses_app_owned_preparation_and_confirmation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Wire a draft-first contract after persona text without broadening authority."""
+    from dj_reachy.subscription_broker import BrokerService, CodexCredential
+
+    observed: list[dict[str, object]] = []
+    original_client = httpx.Client
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        observed.append(body)
+        return httpx.Response(201, headers={"Location": "/calls/rtc_fixture"}, content=b"v=0\r\nfixture-answer\r\n")
+
+    def client(**kwargs: object) -> httpx.Client:
+        return original_client(transport=httpx.MockTransport(upstream))
+
+    monkeypatch.setattr(httpx, "Client", client)
+    briefing = "PERSONA-FIXTURE: greet briefly in Spanish. Before calling make_song_and_dance ask for confirmation."
+    service = BrokerService(lambda: CodexCredential("fixture-oauth", "fixture-account"))
+    service.session({"billing": "subscription", "sdp": "v=0\r\nfixture-offer", "briefing": briefing})
+    session = observed[0]["session"]
+    assert isinstance(session, dict)
+    instructions = session["instructions"]
+    assert isinstance(instructions, str)
+    preparation = "Delegate every new music request to the client immediately to prepare an unbilled draft"
+    assert preparation in instructions
+    assert instructions.index(briefing) < instructions.index(preparation)
+    assert "A second Live delegation is not required for a reply to that pending draft" in instructions
+    assert "Only the client can authorize paid generation after actual user confirmation" in instructions
+    assert "Do not treat silence, your own speech or an earlier approval as current confirmation" in instructions
+    assert "Handle ordinary self-contained conversation directly" in instructions
+    assert "Never generate another track automatically." in instructions
+    assert "The client has only bounded app tools, no shell, files, browsing or general agent." in instructions
+    assert session["delegation"] == {"type": "client"}
+    assert "tools" not in session
+    assert session["model"] == "gpt-live-1-codex"
+    assert session["audio"] == {"output": {"voice": "cove"}}

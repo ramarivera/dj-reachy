@@ -21,9 +21,10 @@ def test_camera_is_exposed_in_both_dj_registries() -> None:
 
 def test_live_frontend_knows_camera_and_background_generation() -> None:
     """The Live frontend must delegate supported vision instead of refusing it."""
-    from dj_reachy.subscription_broker import LIVE_INSTRUCTIONS
+    from dj_reachy.subscription_broker import compose_live_instructions
 
-    text = LIVE_INSTRUCTIONS.lower()
+    # Check the assembled wire policy, not only its generic persona header.
+    text = compose_live_instructions("Synthetic custom persona.").lower()
     assert "camera" in text and "delegate" in text
     assert "continue" in text and "generat" in text
 

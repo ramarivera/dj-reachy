@@ -248,7 +248,7 @@ async def test_real_handler_planner_tool_lifecycle_never_logs_payloads(
         if history:
             return {"calls": [], "output": [], "text": secret}
         return {
-            "calls": [{"name": "make_song_and_dance", "arguments": {"prompt": secret}, "call_id": secret}],
+            "calls": [{"name": "play_saved_song", "arguments": {"filename": secret + ".mp3"}, "call_id": secret}],
             "output": [],
         }
 
@@ -291,8 +291,8 @@ async def test_real_handler_planner_tool_lifecycle_never_logs_payloads(
     assert counts["provider.handled.error"] == 1
     assert counts["planner.started"] >= 1
     assert counts["planner.completed"] >= 1
-    assert counts["tool.started.make_song_and_dance"] == 1
-    assert counts[f"tool.{outcome}.make_song_and_dance"] == 1
+    assert counts["tool.started.play_saved_song"] == 1
+    assert counts[f"tool.{outcome}.play_saved_song"] == 1
     assert counts["delegation.started"] == 1
     assert counts["delegation.cancelled" if outcome == "cancelled" else "delegation.completed"] == 1
     text = (tmp_path / "logs" / "audio-trace.jsonl").read_text()

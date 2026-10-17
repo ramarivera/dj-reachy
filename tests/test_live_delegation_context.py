@@ -3,6 +3,7 @@
 from __future__ import annotations
 import json
 import asyncio
+from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 from collections.abc import Mapping, AsyncIterator
@@ -10,7 +11,9 @@ from collections.abc import Mapping, AsyncIterator
 import pytest
 import pytest_asyncio
 
+import dj_reachy.config as app_config
 from dj_reachy.openai_realtime import OpenaiRealtimeHandler
+from dj_reachy.runtime_settings import DEFAULT_SETTINGS
 from dj_reachy.tools.core_tools import ToolDependencies
 from dj_reachy.subscription_voice import SubscriptionRealtimeAdapter, SubscriptionRealtimeConnection
 
@@ -27,6 +30,9 @@ class DelegationHarness:
         self.connection: SubscriptionRealtimeConnection = SubscriptionRealtimeAdapter().connect()
         self.app.connection = self.connection
         self.requests: list[str] = []
+        self.messages: list[str] = []
+        self.connection._channel = SimpleNamespace(readyState="open", send=self.messages.append)
+        self.connection.ready.set()
 
     async def plan(self, request: str, history: list[dict[str, object]]) -> dict[str, object]:
         """Record the actual planner input and finish in one bounded round."""
@@ -43,7 +49,11 @@ class DelegationHarness:
 
     async def drain(self) -> None:
         """Wait only for app-owned delegated jobs, not a network receiver."""
-        await asyncio.gather(*list(self.app._subscription_tasks.values()))
+        await asyncio.gather(*list(self.app._work_tasks | set(self.app._subscription_tasks.values())))
+
+    async def final(self, text: str) -> SimpleNamespace:
+        """Complete the actual ASR turn before waiting on its delegated planner."""
+        return await self.event({"type": "turn.done", "turn": {"role": "user", "transcript": text}})
 
 
 @pytest_asyncio.fixture
@@ -51,6 +61,19 @@ async def live(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[DelegationHarne
     """Own every task and isolate the only external planner boundary."""
     harness = DelegationHarness()
     monkeypatch.setattr(harness.connection, "plan", harness.plan)
+    settings = deepcopy(DEFAULT_SETTINGS)
+    settings["music"] = {
+        "model_id": "music_v2_5",
+        "duration_ms": 30000,
+        "output_format": "mp3_48000_192",
+        "positive_styles": [],
+        "negative_styles": [],
+        "lyrics": "",
+        "language": "auto",
+        "force_instrumental": False,
+        "finetune_id": None,
+    }
+    monkeypatch.setattr(app_config.runtime_settings_store, "read", lambda: deepcopy(settings))
     try:
         yield harness
     finally:
@@ -74,7 +97,7 @@ async def test_official_content_without_transcript_reaches_planner_once(live: De
     await live.drain()
     assert live.requests == [MODEL_REQUEST_PREFIX + "check availability"]
     assert event.transcript_context == ""  # Model-authored content is never user speech.
-    messages = [json.loads(message) for message in live.connection._pending]
+    messages = [json.loads(message) for message in live.messages]
     assert messages[-1] == {
         "type": "delegation.context.append",
         "channel": "speakable",
@@ -109,6 +132,7 @@ async def test_rejected_notice_does_not_consume_fresh_user_transcript(live: Dele
     else:
         await live.event(request_event("old", "check availability"))
     event = await live.event(request_event("fresh"))
+    await live.final("sing a salsa")
     await live.drain()
     assert event.transcript_context == "sing a salsa"
     assert live.requests[-1] == "sing a salsa"
@@ -141,7 +165,7 @@ async def test_content_only_controls_have_distinct_correlations(
         await live.drain()
     assert commands == ["pause_music", "resume_music", "stop_music", "pause_music"]
     assert live.requests == []
-    messages = [json.loads(message) for message in live.connection._pending]
+    messages = [json.loads(message) for message in live.messages]
     assert [message["delegation_item_id"] for message in messages if message["channel"] == "speakable"] == [
         "pause-1",
         "resume",
@@ -200,6 +224,7 @@ async def test_invalid_delegation_does_not_authorize_or_consume_user_words(
     await live.drain()
     assert live.requests == []
     event = await live.event(request_event("valid"))
+    await live.final("check my saved songs")
     await live.drain()
     assert event.transcript_context == "check my saved songs"
     assert live.requests == ["check my saved songs"]
@@ -226,10 +251,12 @@ async def test_user_words_take_precedence_but_consumed_words_are_never_replayed(
     """Keep actual input separate from delegation paraphrases and assistant output."""
     await live.event({"type": "input_transcript.added", "item": {"text": "sing a salsa"}})
     event = await live.event(request_event("song", "model paraphrase"))
+    await asyncio.sleep(0)
+    assert live.requests == []
+    await live.event({"type": "turn.done", "turn": {"role": "user", "transcript": "sing a salsa"}})
     await live.drain()
     assert event.transcript_context == "sing a salsa"
     assert live.requests == ["sing a salsa"]
-    await live.event({"type": "turn.done", "turn": {"role": "user", "transcript": "sing a salsa"}})
     await live.event({"type": "output_transcript.added", "item": {"text": "stop music"}})
     await live.event({"type": "turn.done", "turn": {"role": "assistant", "transcript": "stop music"}})
     await live.event(request_event("no-new-request"))
@@ -252,6 +279,8 @@ async def test_content_stop_preempts_work_and_rejects_cancellation_resistant_res
     entered, released, stopped = asyncio.Event(), asyncio.Event(), asyncio.Event()
     cancelled: list[bool] = []
     commands: list[str] = []
+    executed: list[dict[str, object]] = []
+    approvals: list[tuple[str, dict[str, object]]] = []
 
     async def block() -> None:
         entered.set()
@@ -262,6 +291,7 @@ async def test_content_stop_preempts_work_and_rejects_cancellation_resistant_res
             await released.wait()
 
     async def plan(request: str, history: list[dict[str, object]]) -> dict[str, object]:
+        live.requests.append(request)
         if blocked_at == "planner":
             await block()
         return {
@@ -269,19 +299,47 @@ async def test_content_stop_preempts_work_and_rejects_cancellation_resistant_res
             "output": [],
         }
 
+    async def approve(text: str, pending: dict[str, object]) -> dict[str, object]:
+        approvals.append((text, pending))
+        return {"confirmation": {"decision": "approve", "arguments": None}, "text": "Fixture approval."}
+
     async def dispatch(name: str, arguments: str, deps: ToolDependencies) -> dict[str, str]:
         commands.append(name)
         if name == "make_song_and_dance":
+            executed.append(json.loads(arguments))
             await block()
+            return {"error": "FixtureTerminal", "message": "No provider job was submitted."}
         elif name == "stop_music":
             stopped.set()
         return {"status": "completed"}
 
     monkeypatch.setattr(live.connection, "plan", plan)
+    monkeypatch.setattr(live.connection, "plan_confirmation", approve)
     monkeypatch.setattr(realtime, "dispatch_tool_call", dispatch)
+    draft = None
     try:
-        await live.event(request_event("song", "sing a salsa"))
+        await live.final("sing a salsa")
+        await live.event(request_event("song", "model paraphrase, not actual consent"))
+        if blocked_at == "song":
+            await live.drain()
+            draft = live.app._pending_music.pending
+            assert draft is not None
+            assert draft.original_user_text == "sing a salsa"
+            assert draft.arguments["prompt"] == "salsa"
+            assert draft.arguments["music_length_ms"] == 30000
+            assert commands == []
+            assert draft.preview in json.dumps([json.loads(message) for message in live.messages]).replace('\\"', '"')
+            await live.final("Generate that exact preview now")
+            approval_event = await live.event(request_event("approval", "The user approved the offered preview"))
+            assert approval_event.transcript_context == "Generate that exact preview now"
         await asyncio.wait_for(entered.wait(), 1)
+        assert live.requests == ["sing a salsa"]
+        if blocked_at == "song":
+            assert draft is not None
+            assert executed == [draft.arguments]
+            assert approvals == [("Generate that exact preview now", draft.pending_payload([]))]
+        # The initial offered preview is valid; only post-stop stale output is forbidden.
+        stop_message_start = len(live.messages)
         await live.event(request_event("stop", "stop music"))
         await asyncio.wait_for(stopped.wait(), 1)
         assert not released.is_set()
@@ -290,7 +348,7 @@ async def test_content_stop_preempts_work_and_rejects_cancellation_resistant_res
         assert cancelled
         assert commands.count("make_song_and_dance") == (1 if blocked_at == "song" else 0)
         assert commands.count("stop_music") == 1
-        messages = [json.loads(message) for message in live.connection._pending]
+        messages = [json.loads(message) for message in live.messages[stop_message_start:]]
         assert not any(
             message["channel"] == "speakable" and message["delegation_item_id"] == "song" for message in messages
         )
@@ -327,9 +385,11 @@ async def test_inactive_handler_cannot_execute_content_controls(
         live.app.connection = live.connection
         live.app._shutdown_requested = False
 
+
 @pytest.mark.asyncio
 async def test_additive_metadata_preserves_current_words_over_model_control(
-    live: DelegationHarness, monkeypatch: pytest.MonkeyPatch,
+    live: DelegationHarness,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Compatible metadata must not promote model/commentary words into user controls."""
     import dj_reachy.openai_realtime as realtime
@@ -342,13 +402,20 @@ async def test_additive_metadata_preserves_current_words_over_model_control(
 
     monkeypatch.setattr(realtime, "dispatch_tool_call", dispatch)
     await live.event({"type": "input_transcript.added", "item": {"text": "check my saved songs"}})
-    wire = {"type": "delegation.created", "item": {
-        "id": "compatible", "type": "delegation", "target": "client", "content": [
-            {"type": "input_text", "text": "stop music", "extra": True},
-            {"type": "output_text", "text": "resume music"},
-        ],
-    }}
+    wire = {
+        "type": "delegation.created",
+        "item": {
+            "id": "compatible",
+            "type": "delegation",
+            "target": "client",
+            "content": [
+                {"type": "input_text", "text": "stop music", "extra": True},
+                {"type": "output_text", "text": "resume music"},
+            ],
+        },
+    }
     event = await live.event(wire)
+    await live.final("check my saved songs")
     await live.drain()
     assert event.transcript_context == "check my saved songs"
     assert live.requests == ["check my saved songs"]

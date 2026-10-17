@@ -433,6 +433,16 @@ class SubscriptionRealtimeConnection:
             {"billing": "subscription", "transcript": transcript, "history": history}, operation="plan"
         )
 
+    async def plan_confirmation(self, transcript: str, pending: dict[str, Any]) -> dict[str, Any]:
+        """Classify a real current reply using only the host's metadata-only planner."""
+        from dj_reachy.voice_planner import validate_confirmation_input
+
+        snapshot = validate_confirmation_input(transcript, pending)
+        return await broker_request({
+            "billing": "subscription", "transcript": transcript, "history": [],
+            "pending_confirmation": snapshot,
+        }, operation="plan")
+
     async def close(self) -> None:
         """End the consumer session, all reader tasks, media and queued input."""
         if self._closed:
