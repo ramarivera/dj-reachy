@@ -257,6 +257,10 @@ class LocalStream:
                             raise error
                         raise RuntimeError("Local session ended")
                     except asyncio.CancelledError:
+                        # asyncio.run translates SIGINT into runner cancellation,
+                        # not close(). Make it terminal before cleanup, otherwise
+                        # we wait for reconnect while the SDK waits for run().
+                        self._stop_event.set()
                         logger.info("Local audio session stopped")
                     except Exception:
                         # Provider/auth bodies are private; keep settings offline.

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dj-reachy-remix"
-version = "0.1.1.dev0"
+version = "0.1.1.dev1"
 authors = [{ name = "Max Zurkinden", email = "max.zurkinden@gmail.com" }]
 description = "DJ Reachy Remix: independent music and subscription-voice fork"
 readme = "README.md"
