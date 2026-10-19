@@ -196,7 +196,10 @@ async def test_drop_reasons_and_track_backlog_are_counted(tmp_path: Path) -> Non
         raise ConnectionError("SENSITIVE exception body token")
 
     app.connection = SimpleNamespace(input_audio_buffer=SimpleNamespace(append=append))
-    await app.receive((24000, pcm))
+    # A transport loss is counted AND propagated so its owner stops capture.
+    from dj_reachy_remix.openai_realtime import VoiceTransportError
+    with pytest.raises(VoiceTransportError, match="^Voice input transport failed$"):
+        await app.receive((24000, pcm))
     connection = SubscriptionRealtimeAdapter(diagnostics=app.diagnostics).connect()
     app.connection = connection
     await connection._append_audio(audio="not decoded when no microphone exists")

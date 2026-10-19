@@ -75,6 +75,10 @@ class VoiceConfiguration(Protocol):
 voice_config = cast(VoiceConfiguration, config)
 
 
+class VoiceTransportError(ConnectionError):
+    """A sanitized input-transport failure, distinct from local PCM/media errors."""
+
+
 class OpenaiRealtimeHandler(AsyncStreamHandler):
     """Keep the voice receiver live while independently owned app tasks execute."""
 
@@ -736,8 +740,11 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
         self.diagnostics.start()
         self._supervisor = asyncio.current_task()
         attempt = 0
+        backend = voice_config.VOICE_BACKEND
         try:
             while not self._shutdown_requested:
+                if voice_config.VOICE_BACKEND != backend:
+                    raise RuntimeError("Voice backend changed; explicit reconnect required")
                 self._restart_requested = False
                 self._create_client(openai_key)
                 try:
@@ -745,14 +752,12 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
                     if not self._restart_requested:
                         return
                     attempt = 0
-                except (ConnectionClosedError, ConnectionError) as exc:
+                except (ConnectionClosedError, ConnectionError):
                     attempt += 1
-                    logger.warning(
-                        "Realtime connection closed unexpectedly (attempt %d): %s", attempt, type(exc).__name__
-                    )
+                    logger.warning("Realtime connection closed unexpectedly: voice_transport (attempt %d)", attempt)
                     if self._shutdown_requested:
                         return
-                    if voice_config.VOICE_BACKEND == "subscription" or attempt >= 3:
+                    if backend == "subscription" or voice_config.VOICE_BACKEND != backend or attempt >= 3:
                         raise
                     await asyncio.sleep(2 ** (attempt - 1))
                 finally:
@@ -1001,9 +1006,11 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
             raise
         try:
             await connection.input_audio_buffer.append(audio=base64.b64encode(pcm.tobytes()).decode("ascii"))
-        except (ConnectionError, RuntimeError):
+        except Exception:
             self.diagnostics.drop("append_failed", size_bytes=pcm.nbytes)
-            logger.debug("Audio input discarded during reconnect")
+            # Propagate to the owner: silently dropping would keep capture alive
+            # after a dead transport. Never expose provider/auth response bodies.
+            raise VoiceTransportError("Voice input transport failed") from None
 
     async def emit(self) -> tuple[int, NDArray[np.int16]] | AdditionalOutputs | None:
         """Emit already received media; never infer consumer response completion from PCM."""
