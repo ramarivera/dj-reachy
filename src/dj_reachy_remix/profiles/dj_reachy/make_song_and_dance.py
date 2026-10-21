@@ -1032,6 +1032,56 @@ def _search_saved_songs(query: str | None) -> Dict[str, Any]:
     return result
 
 
+DANCE_STYLES = ("groove", "bounce", "smooth", "classic")
+MAX_DANCE_LEVEL_PERCENT = 125
+
+
+class SetDanceMotion(Tool):
+    """Let a voice session steer the local dancer the way it steers songs."""
+
+    name = "set_dance_motion"
+    description = (
+        "Change how Reachy dances to music for the rest of this session: style groove, bounce, smooth or "
+        "classic, and/or level_percent from 0 (still) to 125, where 100 is the original DJ Reachy level. "
+        "Use it when the user asks to dance more, less, wilder or smoother. Applies to playing and later songs; "
+        "the control panel's saved defaults are unchanged."
+    )
+    parameters_schema = {
+        "type": "object",
+        "properties": {
+            "style": {"type": ["string", "null"], "enum": [*DANCE_STYLES, None]},
+            "level_percent": {"type": ["integer", "null"], "minimum": 0, "maximum": MAX_DANCE_LEVEL_PERCENT},
+        },
+        "additionalProperties": False,
+    }
+
+    async def __call__(
+        self, deps: ToolDependencies, style: str | None = None, level_percent: int | None = None, **_kwargs: Any
+    ) -> Dict[str, Any]:
+        """Validate locally, then update this run's motion without persisting settings."""
+        global _music_dancer_style
+        from dj_reachy_remix.config import config
+
+        if _kwargs or (style is None and level_percent is None):
+            return {"error": "Give a style and/or level_percent."}
+        if style is not None and style not in DANCE_STYLES:
+            return {"error": f"Style must be one of {', '.join(DANCE_STYLES)}."}
+        if level_percent is not None and (
+            type(level_percent) is not int or not 0 <= level_percent <= MAX_DANCE_LEVEL_PERCENT
+        ):
+            return {"error": f"level_percent must be 0 to {MAX_DANCE_LEVEL_PERCENT}."}
+        if style is not None:
+            config.MOTION_STYLE = style
+            _music_dancer_style = style
+            set_dance_style(style)
+        if level_percent is not None:
+            intensity = round(ORIGINAL_DANCE_INTENSITY * level_percent / 100, 4)
+            config.MOTION_INTENSITY = intensity
+            set_dance_intensity(intensity)
+        logger.info("Voice changed dance motion: %s", motion_summary())
+        return {"status": "applied", "motion": motion_summary()}
+
+
 class PlaySavedSong(Tool):
     """Replay a validated saved MP3 through the same exclusive playback owner."""
 

@@ -555,6 +555,7 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
                     if context_turn_id is not None and callable(clear_context):
                         clear_context(through_turn=context_turn_id)
                     if name == "make_song_and_dance":
+                        skip_confirmation = bool(args.pop("skip_confirmation", False))
                         original = self._final_user_turns.get(context_turn_id or 0, "")
                         if (
                             not allow_music_prepare
@@ -571,6 +572,15 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
                             original_turn=context_turn_id,
                             original_user_text=original,
                         )
+                        if skip_confirmation:
+                            # The user explicitly waived the preview in this same turn and
+                            # accepted the credit cost. The draft still froze validated options.
+                            self._pending_music.clear()
+                            logger.info("User skipped music confirmation; generating immediately")
+                            song = await self._execute("make_song_and_dance", draft.arguments, connection, epoch)
+                            if self._current(connection, epoch):
+                                await connection.send_context(json.dumps(song), "speakable", identity)
+                            return
                         await self._offer_music(draft, connection, epoch, identity)
                         return
                     result = await self._execute(name, args, connection, epoch)

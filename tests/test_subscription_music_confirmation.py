@@ -1106,3 +1106,27 @@ async def test_confirmation_planner_calls_are_counted_without_payloads(wire: Wir
         assert counts["planner." + outcome] == 1
     wire.app.diagnostics.close()
     assert "PRIVATE_DRAFT_PAYLOAD" not in (tmp_path / "logs" / "audio-trace.jsonl").read_text()
+
+
+@pytest.mark.asyncio
+async def test_explicit_skip_confirmation_generates_without_a_preview_reply(wire: WireHarness) -> None:
+    """A user who explicitly asks to skip the prompt goes straight to paid generation, once."""
+    request = ORIGINAL + " Don't ask me to confirm, just make it."
+    wire.normal_args = {**CANDIDATE, "skip_confirmation": True}
+    await wire.user(request)
+    await wire.delegate(text=request)
+    await wire.drain()
+    assert len(wire.songs) == 1
+    assert "skip_confirmation" not in wire.songs[0]
+    assert wire.songs[0]["prompt"] == CANDIDATE["prompt"]
+    assert wire.songs[0]["model_id"] == "music_v2_5"
+    assert wire.app._pending_music.pending is None
+    assert "requires a fresh user reply" not in json.dumps(wire.messages)
+
+
+@pytest.mark.asyncio
+async def test_skip_confirmation_false_still_offers_a_draft(wire: WireHarness) -> None:
+    """Without the explicit request the confirm-before-generate gate is unchanged."""
+    wire.normal_args = {**CANDIDATE, "skip_confirmation": False}
+    await wire.prepare()
+    assert wire.songs == []
