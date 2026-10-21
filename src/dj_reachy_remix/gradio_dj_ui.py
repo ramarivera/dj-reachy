@@ -32,7 +32,8 @@ class DJReachyUI:
             return []
         metadata = self._get_songs_metadata()
         songs: list[list[str]] = []
-        for song in sorted(self._songs_dir.glob("*.mp3"), key=lambda path: path.name, reverse=True):
+        tracks = (path for path in self._songs_dir.iterdir() if path.suffix.lower() == ".mp3")
+        for song in sorted(tracks, key=lambda path: path.name, reverse=True):
             path = self._get_song_path(song.name)
             if path is None:
                 continue

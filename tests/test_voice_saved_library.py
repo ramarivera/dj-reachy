@@ -131,3 +131,15 @@ async def test_newest_first_follows_save_time_not_filename(
     deps = ToolDependencies(reachy_mini=Mock(), movement_manager=Mock())
     result = await dispatch_tool_call("list_saved_songs", "{}", deps)
     assert result["songs"][0]["filename"] == recent
+
+
+@pytest.mark.asyncio
+async def test_uppercase_mp3_tracks_are_listed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replay accepts .MP3, so discovery must too, in the panel and in voice."""
+    from dj_reachy_remix.tools.core_tools import ToolDependencies, dispatch_tool_call
+
+    monkeypatch.setattr(config, "SONGS_DIR", tmp_path)
+    (tmp_path / "LOUD.MP3").write_bytes(b"ID3fixture")
+    deps = ToolDependencies(reachy_mini=Mock(), movement_manager=Mock())
+    result = await dispatch_tool_call("list_saved_songs", "{}", deps)
+    assert [song["filename"] for song in result["songs"]] == ["LOUD.MP3"]
