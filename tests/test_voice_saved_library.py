@@ -47,7 +47,7 @@ async def test_dispatched_listing_returns_playable_newest_first_tracks(
 ) -> None:
     """Run the real registered tool against a fixture library and replay its answer."""
     import dj_reachy_remix.profiles.dj_reachy.make_song_and_dance as music
-    from dj_reachy_remix.tools.core_tools import ToolDependencies, dispatch_tool_call, get_tool_specs
+    from dj_reachy_remix.tools.core_tools import ToolDependencies, get_tool_specs, dispatch_tool_call
 
     monkeypatch.setattr(config, "SONGS_DIR", tmp_path)
     older = _save_track(tmp_path, "1_old", "Birthday song for Ares", 1_700_000_000)
