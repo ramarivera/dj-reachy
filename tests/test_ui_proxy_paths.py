@@ -39,6 +39,7 @@ const settings = {
 };
 const context = vm.createContext({
   URL, console,
+  setTimeout: () => 0,  // toast removal fallback; never needed within this fixture
   window: {location: new URL(page), confirm: () => true},
   document: {
     baseURI: page, currentScript: {src: script},

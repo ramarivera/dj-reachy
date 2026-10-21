@@ -86,7 +86,8 @@ class El {
   get className() { return [...this.classes].join(' '); }
   addEventListener(event, callback) { (this.listeners[event] ||= []).push(callback); }
   fire(event, detail = {}) { return Promise.all((this.listeners[event] || []).map((fn) => fn(detail))); }
-  append(...children) { for (const child of children) { child.parent = this; this.children.push(child); } }
+  append(...children) { for (const child of children) { child.remove(); child.parent = this; child.moves = (child.moves || 0) + 1; this.children.push(child); } }
+  insertBefore(child, anchor) { child.remove(); child.parent = this; child.moves = (child.moves || 0) + 1; this.children.splice(this.children.indexOf(anchor), 0, child); }
   replaceChildren(...children) { this.children = []; this.append(...children); }
   remove() { if (this.parent) this.parent.children = this.parent.children.filter((c) => c !== this); this.parent = null; }
   reportValidity() { return true; }
@@ -94,7 +95,8 @@ class El {
 const element = (id) => { if (!elements.has(id)) elements.set(id, new El()); return elements.get(id); };
 const controls = ['pause', 'resume', 'stop'].map((name) => { const b = new El('button'); b.dataset.control = name; return b; });
 let library = ['b.mp3', 'a.mp3'];
-let failStop = false;
+let failStop = false, busyNext = false, failSettingsPut = false;
+const titles = {}, sizes = {}, timers = [];
 const settings = {
   voice: {backend: 'subscription', model: 'gpt-live-1-codex', voice: 'cove', language: 'auto'},
   music: {model_id: 'music_v2_5', duration_ms: 10000, output_format: 'mp3_48000_192', positive_styles: [],
@@ -104,6 +106,7 @@ const settings = {
 const deferred = () => { let resolve; const promise = new Promise((r) => { resolve = r; }); return {promise, resolve}; };
 const context = vm.createContext({
   URL, console,
+  setTimeout: (fn, ms) => { timers.push({fn, ms}); return timers.length; },
   window: {confirm: () => true},
   document: {
     currentScript: {src: 'https://robot.local/static/main.js'},
@@ -116,14 +119,16 @@ const context = vm.createContext({
     requests.push({path, method, body: options.body || null});
     let data = {}, ok = true;
     if (path.endsWith('/settings') && method === 'GET') data = settings;
+    else if (path.endsWith('/settings') && failSettingsPut) { ok = false; data = {error: 'Settings could not be saved.'}; }
     else if (path.endsWith('/settings')) { const body = JSON.parse(options.body); Object.assign(settings[Object.keys(body)[0]], Object.values(body)[0]); data = settings; }
     else if (path.endsWith('/instructions')) data = {instructions: ''};
     else if (path.endsWith('/status')) data = {billing: 'ChatGPT subscription', provider_access: 'unverified', elevenlabs_key_configured: true};
-    else if (path === '/songs') data = {songs: library.map((filename) => ({filename, title: filename, size: '1.0 MB'}))};
+    else if (path === '/songs') data = {songs: library.map((filename) => ({filename, title: titles[filename] || filename, size: sizes[filename] || '1.0 MB'}))};
     else if (path.startsWith('/songs/') && method === 'DELETE') { library = library.filter((f) => `/songs/${encodeURIComponent(f)}` !== path); data = {status: 'deleted'}; }
     else if (path.endsWith('/music/pause')) data = {status: 'paused'};
     else if (path.endsWith('/music/resume')) data = {status: 'resumed'};
     else if (path.endsWith('/music/stop')) { if (failStop) { ok = false; data = {error: 'Audio session is not running. Connect voice first.'}; } else data = {status: 'stopped', message: 'Local decoder stopped and queued audio cleared.'}; }
+    else if ((path.endsWith('/music/generate') || path.endsWith('/music/replay')) && busyNext) { busyNext = false; data = {status: 'busy', message: 'A music job is already active. Stop it first.'}; }
     else if (path.endsWith('/music/generate') || path.endsWith('/music/replay')) { const d = deferred(); pending.push(d); data = await d.promise; }
     return {ok, status: ok ? 200 : 409, json: async () => data};
   },
@@ -149,6 +154,7 @@ vm.runInContext(fs.readFileSync(process.argv[1], 'utf8'), context);
   const generating = element('generate').fire('click');
   await flush();
   out.generating = deckState();
+  out.generatingText = `${element('deck-state').textContent} ${element('deck-detail').textContent}`;
   out.generateBusy = element('generate').classes.has('is-busy');
   await controls[0].fire('click'); await flush();
   out.paused = deckState();
@@ -195,6 +201,46 @@ vm.runInContext(fs.readFileSync(process.argv[1], 'utf8'), context);
   await element('motion-reset').fire('click'); await flush();
   out.reset = {style: element('motion-style').value, slider: element('intensity').value};
   out.motionPuts = requests.filter((r) => r.method === 'PUT' && r.path.endsWith('/settings')).map((r) => JSON.parse(r.body));
+
+  // A busy rejection keeps the running job's deck state and ownership token.
+  const running = element('songs').children[0].children[2].children[0].fire('click'); await flush();
+  const runningDetail = element('deck-detail').textContent;
+  busyNext = true;
+  await element('songs').children[1].children[2].children[0].fire('click'); await flush();
+  out.busyReplay = {state: deckState(), kept: element('deck-detail').textContent === runningDetail};
+  busyNext = true; element('paid-confirmation').checked = true; await element('paid-confirmation').fire('change');
+  element('prompt').value = 'funk for a robot';
+  await element('generate').fire('click'); await flush();
+  out.busyGenerate = {state: deckState(), kept: element('deck-detail').textContent === runningDetail};
+  pending.shift().resolve({status: 'completed'}); await running; await flush();
+  out.afterRunning = deckState();
+
+  // One refresh that renames a kept track, removes one and adds one.
+  const kept = element('songs').children[1], keptAudio = kept.children[3], goner = element('songs').children[0];
+  const movesBefore = kept.moves;
+  titles['a.mp3'] = 'Renamed groove'; sizes['a.mp3'] = '2.5 MB';
+  library = ['d.mp3', 'a.mp3'];
+  await element('refresh').fire('click'); await flush();
+  out.renamed = {same: kept.parent === element('songs'), title: kept.children[0].textContent,
+                 meta: kept.children[1].textContent, audio: kept.children[3] === keptAudio, moved: kept.moves !== movesBefore};
+  out.combined = {gonerLeaving: goner.classes.has('is-leaving') && goner.parent !== null,
+                  added: element('songs').children.some((r) => r.children[0].textContent === 'd.mp3' && r.classes.has('is-new')),
+                  live: element('songs').children.filter((r) => !r.classes.has('is-leaving')).map((r) => r.children[0].textContent)};
+
+  // A failed reset restores the user's previous motion controls.
+  failSettingsPut = true;
+  element('motion-style').value = 'smooth'; await element('motion-style').fire('change');
+  element('intensity').value = '20'; await element('intensity').fire('input');
+  await element('motion-reset').fire('click'); await flush();
+  out.failedReset = {style: element('motion-style').value, slider: element('intensity').value,
+                     readout: element('intensity-value').textContent, hint: element('motion-style-hint').textContent};
+  failSettingsPut = false;
+
+  // Every toast has a removal timer even if animation events never fire.
+  const toastCount = element('toasts').children.length;
+  out.toastTimers = timers.filter((t) => t.ms >= 5000).length >= toastCount && toastCount > 0;
+  timers.splice(0).forEach((t) => t.fn());
+  out.toastsAfterTimers = element('toasts').children.length;
   console.log(JSON.stringify(out));
 })().catch((error) => { console.error(error); process.exitCode = 1; });
 """
@@ -256,3 +302,41 @@ def test_motion_intensity_uses_the_original_human_scale() -> None:
     assert "125%" in out["maxReadout"]
     assert out["reset"] == {"style": "groove", "slider": "80"}
     assert out["motionPuts"][-1] == {"motion": {"style": "groove", "intensity": 0.2}}
+
+
+def test_busy_start_keeps_the_running_deck() -> None:
+    """A busy replay or generation is a rejected start, not a new deck owner."""
+    out = run_panel()
+    assert out["busyReplay"] == {"state": "is-playing", "kept": True}
+    assert out["busyGenerate"] == {"state": "is-playing", "kept": True}
+    assert out["afterRunning"] == "is-idle"
+
+
+def test_generating_copy_covers_composing_and_playback() -> None:
+    """The generate request stays open through playback, so the copy says both."""
+    out = run_panel()
+    assert "playing" in out["generatingText"].lower()
+    assert "until the track ends" in out["generatingText"]
+
+
+def test_refresh_updates_kept_rows_and_animates_combined_changes() -> None:
+    """Reused rows take fresh metadata in place; adds and removals both animate."""
+    out = run_panel()
+    assert out["renamed"] == {"same": True, "title": "Renamed groove", "meta": "a.mp3, 2.5 MB",
+                              "audio": True, "moved": False}
+    assert out["combined"]["gonerLeaving"] is True and out["combined"]["added"] is True
+    assert out["combined"]["live"] == ["d.mp3", "Renamed groove"]
+
+
+def test_failed_motion_reset_restores_previous_controls() -> None:
+    """A rejected reset leaves the slider, style and readouts on the saved-by-user values."""
+    out = run_panel()
+    assert out["failedReset"]["style"] == "smooth" and out["failedReset"]["slider"] == "20"
+    assert "25%" in out["failedReset"]["readout"] and "half" in out["failedReset"]["hint"].lower()
+
+
+def test_toasts_are_removed_without_animation_events() -> None:
+    """A timer fallback clears toasts when animationend never fires."""
+    out = run_panel()
+    assert out["toastTimers"] is True
+    assert out["toastsAfterTimers"] == 0

@@ -7,7 +7,9 @@ const songs = new URL("songs", appBase).href;
 let settings;
 
 // Feedback. #status is the screen-reader announcement; toasts are its visual
-// twin and are removed by their CSS exit animation, so no timers are needed.
+// twin. Their CSS exit animation removes them; a timer covers browsers or
+// background tabs where animationend never fires. remove() is idempotent.
+const TOAST_FALLBACK_MS = { info: 7000, error: 12000 };
 function toast(text, error) {
   const item = document.createElement("div");
   item.className = error ? "toast is-error" : "toast";
@@ -15,6 +17,7 @@ function toast(text, error) {
   item.addEventListener("animationend", (event) => { if (event.animationName.startsWith("toast-out")) item.remove(); });
   item.addEventListener("click", () => item.remove());
   $("toasts").append(item);
+  setTimeout(() => item.remove(), error ? TOAST_FALLBACK_MS.error : TOAST_FALLBACK_MS.info);
 }
 function status(text, error = false) {
   $("status").textContent = text;
@@ -39,15 +42,39 @@ function showResult(result) {
 // The deck shows what this panel last asked for. Generation and replay requests
 // stay open until the track ends or stops, so the open request is the source of
 // truth. A token stops an older request from resetting a newer one's state.
-const deckTitles = { idle: "Ready", generating: "Generating", playing: "Playing", paused: "Paused", stopping: "Stopping" };
+// /music/generate only returns after playback ends and no endpoint reports the
+// phase, so the generating copy covers both composing and playing.
+const deckTitles = { idle: "Ready", generating: "Composing, then playing", playing: "Playing", paused: "Paused", stopping: "Stopping" };
 let deckOwner = 0;
+let deckView = { state: "idle", detail: "" };
+const openJobs = new Set();
 function deck(state, detail) {
+  deckView = { state, detail };
   $("deck").className = `deck is-${state}`;
   $("deck-state").textContent = deckTitles[state];
   $("deck-detail").textContent = detail;
 }
 function finished(token, detail) {
   if (token === deckOwner) deck("idle", detail);
+}
+// A long request shows its state as soon as it's sent. If the server refuses
+// to start it (busy, invalid, no audio session), the previous owner and view
+// come back, so a job that's still running keeps its deck and its token.
+function claimDeck(state, detail) {
+  const previous = { owner: deckOwner, view: deckView };
+  const token = ++deckOwner;
+  openJobs.add(token);
+  deck(state, detail);
+  return {
+    finish(doneDetail) { openJobs.delete(token); finished(token, doneDetail); },
+    reject(idleDetail) {
+      openJobs.delete(token);
+      if (token !== deckOwner) return;
+      deckOwner = previous.owner;
+      if (openJobs.has(previous.owner)) deck(previous.view.state, previous.view.detail);
+      else deck("idle", idleDetail);
+    },
+  };
 }
 const controlStates = {
   paused: ["paused", "Playback is held. Resume picks up where it stopped."],
@@ -131,25 +158,35 @@ async function refreshStatus() {
 // in progress), animates new rows in and lets deleted rows play an exit first.
 const rows = new Map();
 let listed = false;
-function replay(song, row, button) {
+const notStarted = "Nothing new started. Check the message and try again.";
+function replay(entry, button) {
   return async () => {
-    const token = ++deckOwner;
+    const { song, row } = entry;
+    const claim = claimDeck("playing", `${song.title}, from your library. No regeneration.`);
     busy(button, true); row.classList.toggle("is-playing", true);
-    deck("playing", `${song.title}, from your library. No regeneration.`);
     status("Replaying saved track. Stop remains available.");
-    try { const result = await request(`${api}/music/replay`, "POST", { filename: song.filename }); showResult(result); finished(token, "Track finished or stopped.");
-    } catch (error) { status(error.message, true); finished(token, "Replay didn't start. Check the message and try again.");
+    try {
+      const result = await request(`${api}/music/replay`, "POST", { filename: song.filename });
+      if (result.status === "busy") { status(result.message || "Another track is active. Stop it first.", true); claim.reject(notStarted); return; }
+      showResult(result); claim.finish("Track finished or stopped.");
+    } catch (error) { status(error.message, true); claim.reject(notStarted);
     } finally { busy(button, false); row.classList.toggle("is-playing", false); }
   };
 }
+function describe(entry, song) {
+  entry.song = song;
+  entry.title.textContent = song.title;
+  entry.meta.textContent = `${song.filename}, ${song.size}`;
+}
 function trackRow(song) {
   const row = document.createElement("article"); row.className = "track";
-  const title = document.createElement("h3"); title.textContent = song.title;
+  const title = document.createElement("h3");
   const filename = document.createElement("p"); filename.className = "track-meta";
-  filename.textContent = `${song.filename}, ${song.size}`;
+  const entry = { row, title, meta: filename, song };
+  describe(entry, song);
   const controls = document.createElement("div"); controls.className = "actions";
   const play = document.createElement("button"); play.textContent = "Play on Reachy"; play.className = "small";
-  play.addEventListener("click", replay(song, row, play));
+  play.addEventListener("click", replay(entry, play));
   const remove = document.createElement("button"); remove.textContent = "Delete"; remove.className = "small danger";
   remove.addEventListener("click", async () => {
     if (!window.confirm(`Delete saved track ${song.filename}?`)) return;
@@ -165,28 +202,37 @@ function trackRow(song) {
     if (event.animationName === "track-in") row.classList.toggle("is-new", false);
   });
   controls.append(play, remove); row.append(title, filename, controls, audio);
-  return row;
+  return entry;
 }
 async function refreshSongs() {
   const data = await request(songs);
   const target = $("songs");
   const present = new Set(data.songs.map((song) => song.filename));
-  for (const [name, row] of rows) {
+  for (const [name, entry] of rows) {
     if (present.has(name)) continue;
     rows.delete(name);
-    row.inert = true;
-    row.classList.toggle("is-leaving", true);
+    entry.row.inert = true;
+    entry.row.classList.toggle("is-leaving", true);
   }
-  let inserted = false;
+  const fresh = new Set();
   const next = data.songs.map((song) => {
-    let row = rows.get(song.filename);
-    if (!row) {
-      row = trackRow(song); rows.set(song.filename, row); inserted = true;
-      row.classList.toggle("is-new", listed);
+    let entry = rows.get(song.filename);
+    if (entry) describe(entry, song);
+    else {
+      entry = trackRow(song); rows.set(song.filename, entry); fresh.add(entry.row);
+      entry.row.classList.toggle("is-new", listed);
     }
-    return row;
+    return entry.row;
   });
-  if (!listed || inserted) { target.replaceChildren(); target.append(...next); }
+  if (!listed) { target.replaceChildren(); target.append(...next); }
+  else {
+    // Insert new rows next to their neighbours without moving kept rows, so
+    // previews keep playing and leaving rows finish their exit in place.
+    for (let i = next.length - 1; i >= 0; i--) {
+      if (!fresh.has(next[i])) continue;
+      if (next[i + 1]) target.insertBefore(next[i], next[i + 1]); else target.append(next[i]);
+    }
+  }
   listed = true;
   $("songs-empty").hidden = data.songs.length > 0;
 }
@@ -217,15 +263,21 @@ $("backend").addEventListener("change", () => {
 $("music-mode").addEventListener("change", mode);
 $("intensity").addEventListener("input", showIntensity);
 $("motion-style").addEventListener("change", showStyle);
-$("motion-reset").addEventListener("click", async () => {
-  $("motion-style").value = "groove"; $("intensity").value = toSlider(ORIGINAL_INTENSITY);
+function showMotion(style, slider) {
+  $("motion-style").value = style; $("intensity").value = slider;
   showStyle(); showIntensity();
+}
+$("motion-reset").addEventListener("click", async () => {
+  const previous = { style: $("motion-style").value, slider: $("intensity").value };
+  showMotion("groove", toSlider(ORIGINAL_INTENSITY));
   busy($("motion-reset"), true);
   try {
     settings = await request(`${api}/settings`, "PUT", { motion: { style: "groove", intensity: ORIGINAL_INTENSITY } });
     status("Motion reset to the original DJ Reachy groove and level.");
-  } catch (error) { status(error.message, true); }
-  finally { busy($("motion-reset"), false); }
+  } catch (error) {
+    showMotion(previous.style, previous.slider); // nothing was saved, so show what's still in effect
+    status(error.message, true);
+  } finally { busy($("motion-reset"), false); }
 });
 $("paid-confirmation").addEventListener("change", () => { $("generate").disabled = !$("paid-confirmation").checked; });
 $("generate").addEventListener("click", async () => {
@@ -233,22 +285,26 @@ $("generate").addEventListener("click", async () => {
   const music = musicSettings();
   const { duration_ms, ...options } = music;
   options.music_length_ms = duration_ms;
-  let token = 0;
+  let claim = null;
   try {
     if ($("music-mode").value === "plan") options.composition_plan = JSON.parse($("plan").value);
     else options.prompt = $("prompt").value;
     $("generate").disabled = true; $("paid-confirmation").checked = false;
-    $("generate").classList.toggle("is-busy", true); $("generate").textContent = "Generating...";
-    token = ++deckOwner;
-    deck("generating", "Eleven Music is composing. The track plays on Reachy as soon as it arrives.");
+    $("generate").classList.toggle("is-busy", true); $("generate").textContent = "Composing or playing...";
+    claim = claimDeck("generating", "Eleven Music composes the track, then Reachy plays it. This request stays open until the track ends or you stop it.");
     status("Generating and playing the requested track. Pause and stop remain available.");
     const result = await request(`${api}/music/generate`, "POST", options);
+    if (result.status === "busy") {
+      status(result.message || "Another track is active. Stop it first.", true);
+      claim.reject(notStarted);
+      return;
+    }
     showResult(result);
-    finished(token, result.status === "completed" ? "Track finished. It's saved in your library." : "Generation ended. Check the latest message.");
+    claim.finish(result.status === "completed" ? "Track finished. It's saved in your library." : "Generation ended. Check the latest message.");
     await refreshSongs();
   } catch (error) {
     status(error.message, true);
-    if (token) finished(token, "Generation didn't finish. Check the message and try again.");
+    if (claim) claim.reject(notStarted);
   } finally {
     $("generate").classList.toggle("is-busy", false); $("generate").textContent = "Generate and play new track";
     $("generate").disabled = !$("paid-confirmation").checked;
