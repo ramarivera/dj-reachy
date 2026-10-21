@@ -125,9 +125,9 @@ async def test_generation_ready_precedes_playback_but_completed_result_follows_i
     pytest.param(
         {"type": "turn.done", "turn": {"id": "ordinary-conversation", "role": "assistant", "transcript": "Paris is the capital of France."}},
         id="unrelated-assistant-turn",
-        # Known open bug, ramarivera/dj-reachy#7: no provider contract links the
+        # Known open bug, ramarivera/dj-reachy-remix#7: no provider contract links the
         # ready append to a particular assistant utterance yet.
-        marks=pytest.mark.xfail(strict=True, reason="ramarivera/dj-reachy#7: ready notice lacks a causal completion"),
+        marks=pytest.mark.xfail(strict=True, reason="ramarivera/dj-reachy-remix#7: ready notice lacks a causal completion"),
     ),
     pytest.param(
         {"type": "response.done", "response": {"id": "earlier-unrelated-response", "status": "completed"}},

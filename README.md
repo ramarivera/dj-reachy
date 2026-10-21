@@ -27,7 +27,7 @@ The control panel separates conversation and personality, Eleven Music generatio
 
 Remix stores settings, provider configuration, instructions and saved tracks under `~/.local/share/dj-reachy-remix`, or `$XDG_DATA_HOME/dj-reachy-remix`. `DJ_REACHY_REMIX_HOME` overrides that root. It deliberately ignores the old `DJ_REACHY_HOME` selector and ships no `dj_reachy` import or console compatibility alias. Default model-cache storage is separate too. Provider model IDs and the host-owned subscription authorization flow are unchanged.
 
-Both apps can be installed, but the SDK app manager still gives one app control of the robot at a time. Their hardware and settings server are not intended to run concurrently. The GitHub repository remains `ramarivera/dj-reachy`; changing the release identity does not rename the repository.
+Both apps can be installed, but the SDK app manager still gives one app control of the robot at a time. Their hardware and settings server are not intended to run concurrently. The GitHub repository is `ramarivera/dj-reachy-remix`, matching the app identifier; the old `ramarivera/dj-reachy` URL redirects.
 
 Earlier development builds of this fork used vanilla's package identity. Do not remove an installed `dj-reachy` package assuming it is the fork. Install Remix separately, inspect the app-manager entries, and restore or update vanilla from its canonical source only when intended. Remix does not automatically copy or modify the old application's data. If you need data from an earlier fork build, explicitly copy only the settings, instructions and tracks you own into the Remix home, then configure its credentials separately.
 
