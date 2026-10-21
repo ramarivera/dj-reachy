@@ -61,7 +61,7 @@ const SETTINGS = {
 };
 const flush = async () => { for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r)); };
 function world(mode = {}) {
-  const elements = new Map(), requests = [], timers = [], pending = [];
+  const elements = new Map(), requests = [], timers = [], pending = [], held = [];
   let library = ['b.mp3', 'a.mp3'];
   const element = (id) => { if (!elements.has(id)) elements.set(id, new El()); return elements.get(id); };
   const controls = ['pause', 'resume', 'stop'].map((name) => { const b = new El('button'); b.dataset.control = name; return b; });
@@ -90,7 +90,9 @@ function world(mode = {}) {
       if (path.endsWith('/status')) return reply({billing: 'fixture', provider_access: 'unverified', elevenlabs_key_configured: true});
       if (path === '/songs') {
         if (mode.songs === 'down') throw new TypeError('Failed to fetch');
-        return reply({songs: library.map((filename) => ({filename, title: filename, size: '1.0 MB'}))});
+        const snapshot = reply({songs: library.map((filename) => ({filename, title: filename, size: '1.0 MB'}))});
+        if (mode.holdSongs) { let resolve; const p = new Promise((r) => { resolve = r; }); held.push(resolve); await p; }
+        return snapshot;
       }
       if (path.endsWith('/music/pause')) return reply({status: 'not_playing'});
       if (path.endsWith('/music/stop')) return reply({status: 'stopped'});
@@ -99,7 +101,7 @@ function world(mode = {}) {
     },
   });
   vm.runInContext(source, context);
-  return {element, requests, timers, pending, controls, mode, setLibrary: (names) => { library = names; }};
+  return {element, requests, timers, pending, held, controls, mode, setLibrary: (names) => { library = names; }};
 }
 const toastTexts = (w) => w.element('toasts').children.map((t) => t.textContent);
 const chips = (w) => w.element('connection').children.map((c) => c.textContent);
@@ -145,6 +147,17 @@ const scenarios = {
     const fresh = w.element('songs').children[0];
     return {fresh: {isNew: fresh.classes.has('is-new'), height: fresh.props['--h']},
             goner: {leaving: goner.classes.has('is-leaving'), height: goner.props['--h']}};
+  },
+  async staleRefresh() {
+    const w = world(); await flush();
+    w.mode.holdSongs = true;
+    w.setLibrary(['old.mp3']);
+    w.element('refresh').fire('click'); await flush();
+    w.setLibrary(['n1.mp3', 'n2.mp3', 'n3.mp3']);
+    w.element('refresh').fire('click'); await flush();
+    w.held[1](); await flush();
+    w.held[0](); await flush();
+    return {requests: w.held.length, rows: w.element('songs').children.filter((r) => !r.classes.has('is-leaving')).length};
   },
   async deckSettles() {
     const w = world(); await flush();
@@ -282,3 +295,8 @@ def test_skeleton_rows_mirror_track_rows() -> None:
     css = (STATIC / "style.css").read_text(encoding="utf-8")
     assert '"title actions" "meta actions" "audio audio"' in css_block(css, ".track-skeleton {")
     assert 'id="songs-error"' in html
+
+
+def test_an_older_library_response_cannot_replace_a_newer_one(panel: dict[str, Any]) -> None:
+    """Overlapping refreshes apply only the newest request, whatever order they finish in."""
+    assert panel["staleRefresh"] == {"requests": 2, "rows": 3}

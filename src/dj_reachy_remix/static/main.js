@@ -238,13 +238,18 @@ function trackRow(song) {
   controls.append(play, remove); row.append(title, filename, controls, audio);
   return entry;
 }
+// Overlapping refreshes (startup, Refresh, delete) apply only the newest request.
+let songsRequest = 0;
 async function refreshSongs() {
+  const ticket = ++songsRequest;
   let data;
   try { data = await request(songs); } catch (error) {
+    if (ticket !== songsRequest) return;
     // A failed first load swaps the skeleton for a retry hint instead of shimmering forever.
     if (!listed) { $("songs").replaceChildren(); $("songs-error").hidden = false; }
     throw error;
   }
+  if (ticket !== songsRequest) return;
   $("songs-error").hidden = true;
   const target = $("songs");
   const present = new Set(data.songs.map((song) => song.filename));

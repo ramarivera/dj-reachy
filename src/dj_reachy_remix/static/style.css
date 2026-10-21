@@ -432,7 +432,7 @@ input[type=range]:focus-visible { outline-offset: 4px; }
 .toast.is-error { border-color: rgba(255, 128, 128, .6); background: #3a1f3f; animation-delay: 0s, 9s; }
 .toast.is-error::before { background: var(--red); box-shadow: 0 0 10px rgba(255, 128, 128, .6); }
 .toast:hover { animation-play-state: paused; }
-.toast.is-leaving { animation: toast-out .4s var(--ease) forwards; }
+.toast.is-leaving, .toast.is-leaving:hover { animation: toast-out .4s var(--ease) forwards; animation-play-state: running; }
 
 .footer { padding-top: 8px; padding-bottom: 32px; color: var(--dim); font-size: .8125rem; }
 
