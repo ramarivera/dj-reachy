@@ -97,12 +97,13 @@
         <div class="channel-head"><h2 id="library-heading">Saved tracks</h2><button id="refresh" type="button" class="ghost small">Refresh</button></div>
         <p class="hint">Replay uses the saved file without regeneration. Preview plays only in this browser when you press its play button.</p>
         <div id="songs" class="tracks" aria-live="polite">
-          <div class="track-skeleton" aria-hidden="true"><i></i><i></i><i></i></div>
-          <div class="track-skeleton" aria-hidden="true"><i></i><i></i><i></i></div>
-          <div class="track-skeleton" aria-hidden="true"><i></i><i></i><i></i></div>
+          <div class="track-skeleton" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+          <div class="track-skeleton" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+          <div class="track-skeleton" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
           <p class="visually-hidden">Loading library...</p>
         </div>
         <p id="songs-empty" class="empty" hidden>No saved tracks yet. Tracks you generate land here, ready to replay without spending credits.</p>
+        <p id="songs-error" class="empty is-error" hidden>Saved tracks couldn't load. Check the local app server, then press Refresh.</p>
       </section>
 
       <section id="motion" class="channel ch-motion" aria-labelledby="motion-heading">

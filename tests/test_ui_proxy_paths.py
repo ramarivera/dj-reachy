@@ -21,7 +21,10 @@ const script = process.argv[2];
 const elements = new Map();
 const requests = [];
 class Element {
-  constructor() { this.value = ''; this.children = []; this.listeners = {}; this.classList = {toggle() {}}; }
+  constructor() {
+    this.value = ''; this.children = []; this.listeners = {}; this.classList = {toggle() {}, contains: () => false};
+    this.style = {setProperty() {}}; this.offsetHeight = 0;  // toast heights (--h)
+  }
   addEventListener(event, callback) { this.listeners[event] = callback; }
   append(...children) { children.forEach((child) => { child.parent = this; }); this.children.push(...children); }
   remove() { if (this.parent) this.parent.children.splice(this.parent.children.indexOf(this), 1); this.parent = null; }
