@@ -80,9 +80,10 @@ def app_tool_specs() -> list[dict[str, Any]]:
         ),
         _spec(
             "list_saved_songs",
-            "List the newest saved library tracks with exact filenames and short titles. "
-            "Use it whenever the user asks what songs exist or wants an earlier song replayed.",
-            {},
+            "List saved library tracks, newest first, with exact filenames and short titles. Use it when the "
+            "user asks what songs exist or wants an earlier song. Null query lists the newest; a query searches "
+            "titles and filenames to reach older tracks. Listing never plays anything.",
+            {"query": {"type": ["string", "null"], "maxLength": 200}},
         ),
         _spec(
             "play_saved_song",
@@ -121,9 +122,15 @@ def validate_app_call(name: Any, arguments: Any) -> tuple[str, dict[str, Any]]:
     if not isinstance(name, str) or not isinstance(arguments, dict):
         raise ValueError("Invalid app tool call")
     args = dict(arguments)
-    if name in CONTROL_TOOLS or name in {"stop_dance", "list_saved_songs"}:
+    if name in CONTROL_TOOLS or name == "stop_dance":
         if args:
             raise ValueError("Control commands take no arguments")
+    elif name == "list_saved_songs":
+        query = args.get("query")
+        if set(args) - {"query"} or not (query is None or isinstance(query, str) and len(query) <= 200):
+            raise ValueError("Saved-track search takes only an optional short query")
+        if query is None or not query.strip():
+            args.pop("query", None)
     elif name == "make_song_and_dance":
         if set(args) - {"prompt", "music_length_ms"}:
             raise ValueError("Unsupported song arguments")

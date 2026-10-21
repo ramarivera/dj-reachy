@@ -12,7 +12,6 @@ import threading
 from uuid import uuid4
 from typing import Any, Dict, Optional, cast
 from pathlib import Path
-from datetime import datetime, timezone
 from collections.abc import Callable, Awaitable
 
 import httpx
@@ -989,23 +988,41 @@ class ListSavedSongs(Tool):
 
     name = "list_saved_songs"
     description = (
-        "List the newest saved library tracks with their exact filenames and short titles. "
-        "Use before play_saved_song when the filename isn't already known from this tool."
+        "List saved library tracks, newest first, with exact filenames and short titles. "
+        "Pass query to search titles and filenames; results are capped, so search to reach older tracks. "
+        "Listing never plays anything."
     )
-    parameters_schema = {"type": "object", "properties": {}, "additionalProperties": False}
+    parameters_schema = {
+        "type": "object",
+        "properties": {"query": {"type": ["string", "null"], "maxLength": 200}},
+        "additionalProperties": False,
+    }
 
-    async def __call__(self, deps: ToolDependencies, **_kwargs: Any) -> Dict[str, Any]:
+    async def __call__(self, deps: ToolDependencies, query: str | None = None, **_kwargs: Any) -> Dict[str, Any]:
         """Read only local library metadata; no provider or playback side effects."""
-        rows = await asyncio.to_thread(list_saved_songs)
-        songs = []
-        for row in rows[:LIST_SAVED_SONGS_LIMIT]:
-            title = " ".join(str(row["title"]).split())
+        from dj_reachy_remix.gradio_dj_ui import DJReachyUI
+
+        # Same title resolution as the control panel, including legacy metadata.json.
+        rows = await asyncio.to_thread(DJReachyUI()._list_songs)
+        needle = " ".join(query.split()).casefold() if isinstance(query, str) else ""
+        matches = []
+        for filename, title, _size in rows:
+            try:
+                resolve_saved_song(filename)
+            except (OSError, ValueError):
+                continue
+            title = " ".join(title.split())
+            if needle and needle not in title.casefold() and needle not in filename.casefold():
+                continue
             if len(title) > LIST_SAVED_TITLE_CHARS:
                 title = title[: LIST_SAVED_TITLE_CHARS - 1].rstrip() + "\u2026"
-            created = datetime.fromtimestamp(row["created_at_ms"] / 1000, timezone.utc)
-            songs.append({"filename": row["filename"], "title": title, "created_at": created.isoformat(timespec="minutes")})
-        logger.info("Listed %d of %d saved tracks for voice", len(songs), len(rows))
-        return {"count": len(rows), "songs": songs}
+            matches.append({"filename": filename, "title": title})
+        songs = matches[:LIST_SAVED_SONGS_LIMIT]
+        logger.info("Listed %d of %d saved tracks for voice (query=%s)", len(songs), len(matches), bool(needle))
+        result: Dict[str, Any] = {"count": len(matches), "songs": songs}
+        if len(matches) > len(songs):
+            result["more"] = "Only the newest matches are listed; search with a more specific query for older tracks."
+        return result
 
 
 class PlaySavedSong(Tool):

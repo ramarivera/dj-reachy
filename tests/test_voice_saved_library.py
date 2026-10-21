@@ -26,9 +26,12 @@ def test_list_saved_songs_is_exposed_to_both_voice_registries() -> None:
     tools = {tool["name"]: tool for tool in app_tool_specs()[0]["tools"]}
     assert "list_saved_songs" in tools
     assert "list_saved_songs" in tools["play_saved_song"]["description"]
-    assert validate_app_call("list_saved_songs", {}) == ("list_saved_songs", {})
+    assert validate_app_call("list_saved_songs", {"query": None}) == ("list_saved_songs", {})
+    assert validate_app_call("list_saved_songs", {"query": "ares"}) == ("list_saved_songs", {"query": "ares"})
     with pytest.raises(ValueError):
         validate_app_call("list_saved_songs", {"filename": "x.mp3"})
+    with pytest.raises(ValueError):
+        validate_app_call("list_saved_songs", {"query": "x" * 201})
     profile = Path(__file__).resolve().parents[1] / "src/dj_reachy_remix/profiles/dj_reachy/tools.txt"
     assert "list_saved_songs" in profile.read_text().splitlines()
 
@@ -62,7 +65,6 @@ async def test_dispatched_listing_returns_playable_newest_first_tracks(
     assert [song["filename"] for song in result["songs"]] == [newer, older]
     assert result["songs"][1]["title"] == "Birthday song for Ares"
     assert len(result["songs"][0]["title"]) <= 160
-    assert all("created_at" in song for song in result["songs"])
     for song in result["songs"]:
         assert music.resolve_saved_song(song["filename"]).parent == tmp_path.resolve()
 
@@ -86,6 +88,26 @@ async def test_listing_is_bounded_and_survives_a_missing_library(
     assert listed["count"] == 30
     assert len(listed["songs"]) == 20
     assert listed["songs"][0]["title"] == "Track 29"
+    assert "more" in listed
+
+    oldest = await dispatch_tool_call("list_saved_songs", '{"query": "track 0"}', deps)
+    assert [song["title"] for song in oldest["songs"]][-1] == "Track 0"
+    assert "more" not in oldest
+
+
+@pytest.mark.asyncio
+async def test_listing_uses_the_panel_titles_for_legacy_tracks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Tracks named only in legacy metadata.json keep the title the UI shows."""
+    from dj_reachy_remix.tools.core_tools import ToolDependencies, dispatch_tool_call
+
+    monkeypatch.setattr(config, "SONGS_DIR", tmp_path)
+    (tmp_path / "old_01.mp3").write_bytes(b"ID3fixture")
+    (tmp_path / "metadata.json").write_text(json.dumps({"old_01.mp3": {"title": "Moonlight Waltz"}}))
+    deps = ToolDependencies(reachy_mini=Mock(), movement_manager=Mock())
+    result = await dispatch_tool_call("list_saved_songs", '{"query": "moonlight"}', deps)
+    assert result["songs"] == [{"filename": "old_01.mp3", "title": "Moonlight Waltz"}]
 
 
 def test_listing_is_traced_by_name() -> None:
