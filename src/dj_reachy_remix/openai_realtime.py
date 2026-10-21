@@ -224,18 +224,24 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
                     self._music_call_active = False
         return await self._dispatch(name, args)
 
-    async def notify_song_ready(self) -> None:
+    async def notify_song_ready(self) -> bool:
         """Announce actual generation completion before playback acquires its mute.
 
         Only the background song task waits here. The live receiver continues
         accepting conversation, interruption and stop commands throughout.
+        Timeout, unavailable drainage, or replaced ownership refuses playback.
         """
         connection, epoch = self.connection, self._work_epoch
         if connection is None or not self._current(connection, epoch):
-            return
+            return False
         notice = asyncio.Event()
         self._music_ready_notice = notice
-        text = "The music generation completed successfully. Tell the user their song is ready; playback will start after this announcement."
+        text = json.dumps({
+            "tool": "make_song_and_dance", "status": "generated", "playback_status": "not_started",
+            "message": "Briefly announce that the song is ready and playback will start next. "
+            "Do not ask for feedback yet; the user has not heard the song. "
+            "Playback completion will be reported separately.",
+        })
         try:
             if voice_config.VOICE_BACKEND == "subscription":
                 await connection.send_context(text, "speakable", None)
@@ -252,11 +258,14 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
                 await asyncio.wait_for(notice.wait(), 8)
             except asyncio.TimeoutError:
                 logger.warning("Song-ready speech completion was not confirmed within its bounded wait")
+                return False
             if self._current(connection, epoch) and self._drain_queue is not None:
-                await self._drain_queue()
+                drained = await self._drain_queue()
+                return drained is True and self._current(connection, epoch)
         finally:
             if self._music_ready_notice is notice:
                 self._music_ready_notice = None
+        return False
 
     def schedule_tool_call(self, tool_name: str, args_json: str, call_id: str) -> asyncio.Task[None]:
         """Run API Realtime function calls independently and dedupe completed IDs."""
@@ -908,7 +917,7 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
                     (24000, np.frombuffer(base64.b64decode(event.delta), dtype=np.int16).reshape(1, -1))
                 )
         elif kind == "response.done":
-            if self._music_ready_notice is not None:
+            if voice_config.VOICE_BACKEND == "api_key" and self._music_ready_notice is not None:
                 self._music_ready_notice.set()
             if self._waiting_for_response:
                 self._response_done_event.set()

@@ -757,7 +757,12 @@ class MakeSongAndDance(Tool):
                 return {"status": "cancelled", "message": "Local result discarded; provider work may have continued."}
             notify = getattr(deps.openai_realtime_handler, "notify_song_ready", None)
             if callable(notify):
-                await cast(Callable[[], Awaitable[None]], notify)()
+                notice_drained = await cast(Callable[[], Awaitable[bool | None]], notify)()
+                if notice_drained is False:
+                    return {
+                        "status": "stopped", "song_path": path,
+                        "message": "Saved song retained; readiness announcement was interrupted.",
+                    }
             if cancel_event.is_set():
                 return {"status": "stopped", "song_path": path, "message": "Saved song retained; playback cancelled."}
             if _generation_cancel is cancel_event:

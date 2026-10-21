@@ -231,6 +231,10 @@ class SubscriptionRealtimeConnection:
         self._owns_diagnostics = adapter.diagnostics is None
         self._events: asyncio.Queue[Any] = asyncio.Queue(maxsize=256)
         self._audio_events: asyncio.Queue[Any] = asyncio.Queue(maxsize=64)
+        self._completion_events: deque[tuple[int, Any]] = deque()
+        self._audio_enqueued = 0
+        self._audio_consumed = 0
+        self._audio_dropped = 0
         self._available = asyncio.Event()
         self._pending: deque[str] = deque()
         self._audio_readers: list[asyncio.Task[None]] = []
@@ -258,15 +262,27 @@ class SubscriptionRealtimeConnection:
         if isinstance(kind, str):
             self.diagnostics.provider_event(kind)
         if getattr(event, "type", None) == "response.audio.delta":
+            self._audio_enqueued += 1
             if self._audio_events.full():
                 self._audio_events.get_nowait()
+                self._audio_consumed += 1
+                self._audio_dropped += 1
             self._audio_events.put_nowait(event)
         else:
-            if self._events.full():
+            turn = getattr(event, "turn", None)
+            completion = kind == "turn.done" and isinstance(turn, dict) and turn.get("role") == "assistant"
+            if self._events.full() or completion and len(self._completion_events) >= 256:
                 # Excess control traffic is a protocol failure, never authority to run stale commands.
                 while not self._events.empty():
                     self._events.get_nowait()
+                self._completion_events.clear()
                 event = SimpleNamespace(type="session.closed", reason="event backlog exceeded")
+            elif completion:
+                # This is only a local PCM watermark, not a provider speech receipt.
+                # User/control traffic retains priority over this finite fence.
+                self._completion_events.append((self._audio_enqueued, event))
+                self._available.set()
+                return
             self._events.put_nowait(event)
         self._available.set()
 
@@ -475,6 +491,8 @@ class SubscriptionRealtimeConnection:
                 for queue in (self._events, self._audio_events):
                     while not queue.empty():
                         queue.get_nowait()
+                self._completion_events.clear()
+                self._audio_consumed = self._audio_enqueued
                 self._enqueue(None)
                 self.diagnostics.lifecycle("connection", "closed")
                 if self._owns_diagnostics:
@@ -492,12 +510,18 @@ class SubscriptionRealtimeConnection:
         """Attach only the current unconsumed user turn to a delegation."""
         if self._closed:
             raise StopAsyncIteration
-        while self._events.empty() and self._audio_events.empty():
+        while self._events.empty() and self._audio_events.empty() and not self._completion_events:
             if self._closed:
                 raise StopAsyncIteration
             self._available.clear()
             await self._available.wait()
-        event = self._events.get_nowait() if not self._events.empty() else self._audio_events.get_nowait()
+        if not self._events.empty():
+            event = self._events.get_nowait()
+        elif self._completion_events and self._completion_events[0][0] <= self._audio_consumed:
+            event = self._completion_events.popleft()[1]
+        else:
+            event = self._audio_events.get_nowait()
+            self._audio_consumed += 1
         if event is None:
             raise StopAsyncIteration
         self._prune_pending_user_context()
@@ -547,6 +571,11 @@ class SubscriptionRealtimeConnection:
                             event.prior_user_context = tuple(text for _, _, text in self._pending_user_context)
                             self._consumed_turn = self._turn_id
                             self._current_input = ""
+        # Consumer wire turn.delta carries a real provider turn_id. Preserve it
+        # separately before attaching the app's legacy local user-turn counter.
+        # This internal annotation is neither an outbound field nor an append receipt.
+        wire_turn_id = getattr(event, "turn_id", None)
+        event.provider_turn_id = wire_turn_id if isinstance(wire_turn_id, str) else None
         event.turn_id = self._turn_id
         return event
 
