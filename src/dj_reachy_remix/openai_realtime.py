@@ -75,6 +75,10 @@ class VoiceConfiguration(Protocol):
 voice_config = cast(VoiceConfiguration, config)
 
 
+class VoiceTransportError(ConnectionError):
+    """A sanitized input-transport failure, distinct from local PCM/media errors."""
+
+
 class OpenaiRealtimeHandler(AsyncStreamHandler):
     """Keep the voice receiver live while independently owned app tasks execute."""
 
@@ -220,18 +224,24 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
                     self._music_call_active = False
         return await self._dispatch(name, args)
 
-    async def notify_song_ready(self) -> None:
+    async def notify_song_ready(self) -> bool:
         """Announce actual generation completion before playback acquires its mute.
 
         Only the background song task waits here. The live receiver continues
         accepting conversation, interruption and stop commands throughout.
+        Timeout, unavailable drainage, or replaced ownership refuses playback.
         """
         connection, epoch = self.connection, self._work_epoch
         if connection is None or not self._current(connection, epoch):
-            return
+            return False
         notice = asyncio.Event()
         self._music_ready_notice = notice
-        text = "The music generation completed successfully. Tell the user their song is ready; playback will start after this announcement."
+        text = json.dumps({
+            "tool": "make_song_and_dance", "status": "generated", "playback_status": "not_started",
+            "message": "Briefly announce that the song is ready and playback will start next. "
+            "Do not ask for feedback yet; the user has not heard the song. "
+            "Playback completion will be reported separately.",
+        })
         try:
             if voice_config.VOICE_BACKEND == "subscription":
                 await connection.send_context(text, "speakable", None)
@@ -248,11 +258,14 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
                 await asyncio.wait_for(notice.wait(), 8)
             except asyncio.TimeoutError:
                 logger.warning("Song-ready speech completion was not confirmed within its bounded wait")
+                return False
             if self._current(connection, epoch) and self._drain_queue is not None:
-                await self._drain_queue()
+                drained = await self._drain_queue()
+                return drained is True and self._current(connection, epoch)
         finally:
             if self._music_ready_notice is notice:
                 self._music_ready_notice = None
+        return False
 
     def schedule_tool_call(self, tool_name: str, args_json: str, call_id: str) -> asyncio.Task[None]:
         """Run API Realtime function calls independently and dedupe completed IDs."""
@@ -736,8 +749,11 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
         self.diagnostics.start()
         self._supervisor = asyncio.current_task()
         attempt = 0
+        backend = voice_config.VOICE_BACKEND
         try:
             while not self._shutdown_requested:
+                if voice_config.VOICE_BACKEND != backend:
+                    raise RuntimeError("Voice backend changed; explicit reconnect required")
                 self._restart_requested = False
                 self._create_client(openai_key)
                 try:
@@ -745,14 +761,12 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
                     if not self._restart_requested:
                         return
                     attempt = 0
-                except (ConnectionClosedError, ConnectionError) as exc:
+                except (ConnectionClosedError, ConnectionError):
                     attempt += 1
-                    logger.warning(
-                        "Realtime connection closed unexpectedly (attempt %d): %s", attempt, type(exc).__name__
-                    )
+                    logger.warning("Realtime connection closed unexpectedly: voice_transport (attempt %d)", attempt)
                     if self._shutdown_requested:
                         return
-                    if voice_config.VOICE_BACKEND == "subscription" or attempt >= 3:
+                    if backend == "subscription" or voice_config.VOICE_BACKEND != backend or attempt >= 3:
                         raise
                     await asyncio.sleep(2 ** (attempt - 1))
                 finally:
@@ -903,7 +917,7 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
                     (24000, np.frombuffer(base64.b64decode(event.delta), dtype=np.int16).reshape(1, -1))
                 )
         elif kind == "response.done":
-            if self._music_ready_notice is not None:
+            if voice_config.VOICE_BACKEND == "api_key" and self._music_ready_notice is not None:
                 self._music_ready_notice.set()
             if self._waiting_for_response:
                 self._response_done_event.set()
@@ -1001,9 +1015,11 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
             raise
         try:
             await connection.input_audio_buffer.append(audio=base64.b64encode(pcm.tobytes()).decode("ascii"))
-        except (ConnectionError, RuntimeError):
+        except Exception:
             self.diagnostics.drop("append_failed", size_bytes=pcm.nbytes)
-            logger.debug("Audio input discarded during reconnect")
+            # Propagate to the owner: silently dropping would keep capture alive
+            # after a dead transport. Never expose provider/auth response bodies.
+            raise VoiceTransportError("Voice input transport failed") from None
 
     async def emit(self) -> tuple[int, NDArray[np.int16]] | AdditionalOutputs | None:
         """Emit already received media; never infer consumer response completion from PCM."""

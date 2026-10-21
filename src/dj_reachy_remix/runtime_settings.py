@@ -274,7 +274,24 @@ def register_runtime_settings_routes(app: FastAPI, path: Path) -> None:
             "provider_access": "unverified",
             "voice_changes": "Reconnect voice after changing conversation settings or instructions.",
             "browser_voice_available": hasattr(app.state, "dj_voice_stream"),
+            **(app.state.dj_voice_status() if hasattr(app.state, "dj_voice_status") else
+               {"voice_state": "not_connected", "voice_error": None}),
         }
+
+    @app.post("/api/dj-reachy-remix/voice/reconnect")
+    async def reconnect_voice(request: Request) -> Any:
+        # A POST is deliberate: status polling and settings saves never connect.
+        reconnect = getattr(app.state, "dj_voice_reconnect", None)
+        if reconnect is None:
+            return JSONResponse({"error": "Local voice reconnect is unavailable."}, status_code=409)
+        try:
+            if await request.json() != {}:
+                raise ValueError("Reconnect takes no options")
+            return JSONResponse(await reconnect(), status_code=202)
+        except (ValueError, TypeError):
+            return JSONResponse({"error": "Reconnect requires an empty object."}, status_code=400)
+        except RuntimeError:
+            return JSONResponse({"error": "Voice is active, stopping, or unavailable. Wait for offline status."}, status_code=409)
 
     @app.post("/api/dj-reachy-remix/credentials")
     async def save_credential(request: Request) -> Any:

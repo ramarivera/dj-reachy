@@ -9,6 +9,8 @@
 <header><div><p class="eyebrow">DJ Reachy Remix</p><h1>Music and conversation</h1></div><a id="voice-link" href="/voice" target="_top" hidden>Open browser voice</a></header>
 <main>
   <p id="connection" class="notice" role="status">Loading settings...</p>
+  <p id="voice-status" role="status" aria-live="polite">Voice status pending.</p>
+  <button id="voice-reconnect" type="button" hidden>Reconnect voice (new session)</button>
   <div class="transport" aria-label="Music playback">
     <button data-control="pause">Pause</button><button data-control="resume">Resume</button><button data-control="stop" class="stop">Stop music</button>
     <span>Stops local playback. Provider generation may continue.</span>
@@ -50,4 +52,50 @@
     <section aria-labelledby="library-heading"><div class="section-heading"><h2 id="library-heading">Saved tracks</h2><button id="refresh" type="button">Refresh</button></div><p class="hint">Replay uses the saved file without regeneration. Preview plays only in this browser when you press its play button.</p><div id="songs" aria-live="polite">Loading library...</div></section>
   </div>
 </main><footer>Local controls. Provider access and robot startup are separate checks.</footer>
+<script>
+window.addEventListener("DOMContentLoaded", async () => {
+  const base = new URL("../", document.querySelector("script[src]").src);
+  const endpoint = new URL("api/dj-reachy-remix/", base);
+  const text = document.getElementById("voice-status");
+  const button = document.getElementById("voice-reconnect");
+  let requesting = false;
+  async function refreshVoice() {
+    try {
+      const response = await fetch(new URL("status", endpoint));
+      if (!response.ok) throw new Error("status unavailable");
+      const state = await response.json();
+      const descriptions = {not_connected: "Voice not connected.", connecting: "Voice connecting.",
+        connected: "Voice transport connected. This does not verify audible output or provider entitlement.",
+        stopping: "Voice stopping.", offline: "Voice offline. No automatic reconnect or billing fallback.", stopped: "Voice stopped."};
+      const errors = {voice_transport: "Voice transport failed.", media: "Local audio failed.",
+        voice_shutdown: "Voice cleanup failed; restart the app before reconnecting.",
+        media_shutdown: "Audio cleanup failed; restart the app before reconnecting."};
+      text.textContent = `${descriptions[state.voice_state] || "Voice state unavailable."} ${errors[state.voice_error] || ""}`;
+      button.hidden = !state.voice_reconnect_available;
+      button.disabled = requesting;
+    } catch (_) {
+      text.textContent = "Voice status unavailable. Check the local app server.";
+      button.hidden = true;
+    }
+  }
+  button.addEventListener("click", async () => {
+    if (requesting || !window.confirm("Start one new voice session? Subscription sessions may consume quota. No billing fallback is used.")) return;
+    requesting = true;
+    button.disabled = true;
+    try {
+      const response = await fetch(new URL("voice/reconnect", endpoint), {
+        method: "POST", headers: {"Content-Type": "application/json"}, body: "{}"});
+      if (!response.ok) throw new Error("reconnect unavailable");
+      await refreshVoice();
+    } catch (_) {
+      text.textContent = "Voice reconnect unavailable. Check status before trying again.";
+    } finally {
+      requesting = false;
+      button.disabled = false;
+    }
+  });
+  await refreshVoice();
+  setInterval(refreshVoice, 2000); // Read-only polling never opens a voice session.
+});
+</script>
 </body></html>

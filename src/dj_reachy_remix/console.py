@@ -20,7 +20,7 @@ from starlette.staticfiles import StaticFiles
 
 from reachy_mini import ReachyMini
 from dj_reachy_remix.config import config
-from dj_reachy_remix.openai_realtime import OpenaiRealtimeHandler
+from dj_reachy_remix.openai_realtime import VoiceTransportError, OpenaiRealtimeHandler
 from dj_reachy_remix.runtime_settings import register_runtime_settings_routes
 from dj_reachy_remix.audio.streaming_pcm import StreamingPCMConverter
 from dj_reachy_remix.audio.native_playback import configure_native_playback
@@ -126,11 +126,15 @@ class LocalStream:
         self._robot = robot
         self._output_tail_delay = configure_native_playback(getattr(robot.media, "audio", None))
         self._stop_event = asyncio.Event()
+        self._reconnect_event = asyncio.Event()
         self._tasks: list[asyncio.Task[None]] = []
         self._asyncio_loop: asyncio.AbstractEventLoop | None = None
         self._runner_task: asyncio.Task[None] | None = None
         self._closing = False
         self._launched = False
+        self._voice_state = "not_connected"
+        self._voice_error: str | None = None
+        self._reconnect_safe = True
         self._media_started = False
         self._play_epoch = 0
         self._playback_clock = 0.0
@@ -168,6 +172,33 @@ class LocalStream:
 
         app.state.dj_invoke = self.invoke
         app.state.dj_dependencies = self.handler.deps
+        app.state.dj_voice_status = self.voice_status
+        app.state.dj_voice_reconnect = self.reconnect
+
+    def voice_status(self) -> dict[str, Any]:
+        """Report transport state, not acoustic readiness or provider entitlement."""
+        connected = getattr(self.handler, "_connected_event", None)
+        state = self._voice_state
+        connection = getattr(self.handler, "connection", None)
+        if (state == "connecting" and connected is not None and connected.is_set()
+                and connection is not None and getattr(connection, "_closed", False) is not True):
+            state = "connected"
+        return {"voice_state": state, "voice_error": self._voice_error,
+                "voice_reconnect_available": state == "offline" and self._reconnect_safe and not self._stop_event.is_set()}
+
+    async def reconnect(self) -> dict[str, Any]:
+        """Admit one deliberate attempt only after the previous owner has stopped."""
+        loop = self._asyncio_loop
+        if loop is None or not loop.is_running() or self._stop_event.is_set():
+            raise RuntimeError("Voice owner is stopped")
+        if loop is not asyncio.get_running_loop():
+            return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(self.reconnect(), loop))
+        if self._voice_state != "offline" or not self._reconnect_safe:
+            raise RuntimeError("Voice is already active or still stopping")
+        # Reserve synchronously on the owner loop, before waking the runner.
+        self._voice_state = "connecting"
+        self._reconnect_event.set()
+        return {"status": "connecting"}
 
     async def invoke(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """Keep decoder/task ownership off the HTTP server's separate event loop."""
@@ -176,7 +207,7 @@ class LocalStream:
         from dj_reachy_remix.tools.core_tools import dispatch_tool_call
 
         loop = self._asyncio_loop
-        if loop is None or not loop.is_running():
+        if loop is None or not loop.is_running() or self._closing:
             raise RuntimeError("Audio session is not running. Connect voice before playback.")
         future = asyncio.run_coroutine_threadsafe(
             dispatch_tool_call(tool, json.dumps(arguments), self.handler.deps), loop
@@ -193,32 +224,89 @@ class LocalStream:
             self._asyncio_loop = asyncio.get_running_loop()
             self._runner_task = asyncio.current_task()
             try:
-                while config.VOICE_BACKEND == "api_key" and not config.OPENAI_API_KEY:
+                while not self._stop_event.is_set():
+                    self._closing = False
+                    self._voice_state = "connecting"
+                    self._voice_error = None
+                    category = "media"
+                    try:
+                        while config.VOICE_BACKEND == "api_key" and not config.OPENAI_API_KEY:
+                            if self._stop_event.is_set():
+                                return
+                            await asyncio.sleep(0.2)
+                        if self._stop_event.is_set():
+                            return
+                        self.handler.diagnostics.start()
+                        self._media_started = True
+                        await self._capture_io.call(self._robot.media.start_recording)
+                        await self._playback_io.call(self._robot.media.start_playing)
+                        self._tasks = [
+                            asyncio.create_task(self.handler.start_up(), name="voice-handler"),
+                            asyncio.create_task(self.record_loop(), name="stream-record-loop"),
+                            asyncio.create_task(self.play_loop(), name="stream-play-loop"),
+                        ]
+                        done, _ = await asyncio.wait(self._tasks, return_when=asyncio.FIRST_COMPLETED)
+                        # A clean provider EOF is still offline. Do not leave the
+                        # capture/play siblings running after their owner exits.
+                        first = next(task for task in self._tasks if task in done)
+                        error = first.exception()
+                        category = "voice_transport" if (
+                            first is self._tasks[0] or isinstance(error, VoiceTransportError)
+                        ) else "media"
+                        if error is not None:
+                            raise error
+                        raise RuntimeError("Local session ended")
+                    except asyncio.CancelledError:
+                        # asyncio.run translates SIGINT into runner cancellation,
+                        # not close(). Make it terminal before cleanup, otherwise
+                        # we wait for reconnect while the SDK waits for run().
+                        self._stop_event.set()
+                        logger.info("Local audio session stopped")
+                    except Exception:
+                        # Provider/auth bodies are private; keep settings offline.
+                        self._voice_error = category
+                        logger.warning("Local session failed: %s", category)
+                    finally:
+                        self._closing = True
+                        self._voice_state = "stopping"
+                        self._playback_interrupt.set()
+                        self._play_epoch += 1
+                        self._output_changed.set()
+                        for task in self._tasks:
+                            task.cancel()
+                        await asyncio.gather(*self._tasks, return_exceptions=True)
+                        try:
+                            await self._shutdown_audio()
+                        except Exception:
+                            self._reconnect_safe = False
+                            self._voice_error = "media_shutdown"
+                            logger.warning("Local session failed: media_shutdown")
+                        try:
+                            await self.handler.shutdown()
+                        except Exception:
+                            self._reconnect_safe = False
+                            self._voice_error = "voice_shutdown"
+                            logger.warning("Local session failed: voice_shutdown")
+                        # Discard, never drain, the previous session's filter tail.
+                        self._pcm_converter = None
+                        self._pcm_rates = None
+                        self._playback_clock = 0.0
+                        self._quiet_seconds = 0.0
+                        self._native_idle = False
+                        self._output_changed = asyncio.Event()
+                        self._flushed_epoch = self._play_epoch
+                    self._voice_state = "offline"
                     if self._stop_event.is_set():
-                        return
-                    await asyncio.sleep(0.2)
-                if self._stop_event.is_set():
-                    return
-                self.handler.diagnostics.start()
-                self._media_started = True
-                await self._capture_io.call(self._robot.media.start_recording)
-                await self._playback_io.call(self._robot.media.start_playing)
-                self._tasks = [
-                    asyncio.create_task(self.handler.start_up(), name="voice-handler"),
-                    asyncio.create_task(self.record_loop(), name="stream-record-loop"),
-                    asyncio.create_task(self.play_loop(), name="stream-play-loop"),
-                ]
-                await asyncio.gather(*self._tasks)
-            except asyncio.CancelledError:
-                logger.info("Local audio session stopped")
+                        break
+                    await self._reconnect_event.wait()
+                    self._reconnect_event.clear()
+                    if not self._stop_event.is_set():
+                        # Prior owners are drained and finished, never reused.
+                        self._capture_io = _AudioIO("native-audio-capture")
+                        self._playback_io = _AudioIO("native-audio-playback")
+                        self._playback_interrupt = threading.Event()
             finally:
-                self._closing = True
-                self._stop_event.set()
-                for task in self._tasks:
-                    task.cancel()
-                await asyncio.gather(*self._tasks, return_exceptions=True)
-                await self._shutdown_audio()
-                await self.handler.shutdown()
+                self._voice_state = "stopped"
                 self._asyncio_loop = None
 
         asyncio.run(runner())
@@ -229,6 +317,7 @@ class LocalStream:
 
         def cancel() -> None:
             self._stop_event.set()
+            self._reconnect_event.set()
             self._output_changed.set()
             if not self._closing and self._runner_task is not None:
                 self._runner_task.cancel()
@@ -371,7 +460,9 @@ class LocalStream:
         )
         for result in results:
             if isinstance(result, BaseException):
-                logger.debug("Media shutdown: %s", type(result).__name__)
+                self._reconnect_safe = False
+                self._voice_error = "media_shutdown"
+                logger.warning("Local session failed: media_shutdown")
         self._media_started = False
 
     async def record_loop(self) -> None:
