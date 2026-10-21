@@ -34,12 +34,14 @@ logger = logging.getLogger(__name__)
 
 # Module-level music dancer instance (lazily initialized)
 _music_dancer: Optional[MusicDancer] = None
+_music_dancer_style = "groove"
+ORIGINAL_DANCE_INTENSITY = 0.2  # upstream DJ Reachy hardcoded level
 _music_dancer_deps: Optional[ToolDependencies] = None
 
 
 def _get_music_dancer(deps: ToolDependencies) -> MusicDancer:
     """Get or create the module-level MusicDancer instance."""
-    global _music_dancer, _music_dancer_deps
+    global _music_dancer, _music_dancer_deps, _music_dancer_style
     from dj_reachy_remix.config import config
 
     if _music_dancer is None or _music_dancer_deps is not deps:
@@ -48,9 +50,10 @@ def _get_music_dancer(deps: ToolDependencies) -> MusicDancer:
             sample_rate=OPEN_AI_OUTPUT_SAMPLE_RATE,
             intensity=float(getattr(config, "MOTION_INTENSITY", 0.2)),
         )
-        _music_dancer._controller.style = _dance_style(getattr(config, "MOTION_STYLE", "groove"))
+        _music_dancer_style = str(getattr(config, "MOTION_STYLE", "groove"))
+        _music_dancer._controller.style = _dance_style(_music_dancer_style)
         _music_dancer_deps = deps
-        logger.info("Created new MusicDancer instance")
+        logger.info("Created new MusicDancer instance: %s", motion_summary())
     return _music_dancer
 
 
@@ -67,7 +70,7 @@ def set_dance_intensity(intensity: float) -> None:
     """Set dance intensity for the UI."""
     if _music_dancer is not None:
         _music_dancer.intensity = max(0.0, min(0.25, intensity))
-        logger.info("Dance intensity updated")
+        logger.info("Dance intensity updated: %s", motion_summary())
 
 
 def _dance_style(name: str) -> DanceStyle:
@@ -114,8 +117,21 @@ def _dance_style(name: str) -> DanceStyle:
 
 def set_dance_style(style: str) -> None:
     """Apply one allow-listed motion preset without changing controller bounds."""
+    global _music_dancer_style
     if _music_dancer is not None:
         _music_dancer._controller.style = _dance_style(style)
+        _music_dancer_style = style
+        logger.info("Dance style updated: %s", motion_summary())
+
+
+def motion_summary() -> dict[str, Any]:
+    """Describe the live motion level relative to the original DJ Reachy default."""
+    intensity = get_dance_intensity()
+    return {
+        "style": _music_dancer_style,
+        "intensity": round(intensity, 4),
+        "percent_of_original": round(100 * intensity / ORIGINAL_DANCE_INTENSITY),
+    }
 
 
 ELEVEN_MUSIC_URL = "https://api.elevenlabs.io/v1/music"
@@ -478,6 +494,9 @@ def _compose_music_to_mp3(
     return asyncio.run(_compose_music(prompt, timeout_s, deps, **options))
 
 
+LIST_SAVED_SONGS_LIMIT = 20
+LIST_SAVED_TITLE_CHARS = 160
+
 OPEN_AI_OUTPUT_SAMPLE_RATE = 24000  # must match openai_realtime.py
 
 # Chunk size: 960 samples @ 24kHz = 40ms of audio
@@ -562,6 +581,7 @@ async def _play_mp3(
         assert proc.stdout is not None
         stderr_task = asyncio.create_task(_drain_pipe(proc.stderr))
         dancer.start()
+        logger.info("Playback dancing with %s via %s", motion_summary(), "mpg123" if executable else "PyAV decoder")
         loop = asyncio.get_running_loop()
         pacing_deadline: float | None = None
         data = b""
@@ -963,11 +983,63 @@ def delete_saved_song(filename: str) -> bool:
     return True
 
 
+class ListSavedSongs(Tool):
+    """Let voice sessions discover the library instead of guessing filenames."""
+
+    name = "list_saved_songs"
+    description = (
+        "List saved library tracks, newest first, with exact filenames and short titles. "
+        "Pass query to search titles and filenames; results are capped, so search to reach older tracks. "
+        "Listing never plays anything."
+    )
+    parameters_schema = {
+        "type": "object",
+        "properties": {"query": {"type": ["string", "null"], "maxLength": 200}},
+        "additionalProperties": False,
+    }
+
+    async def __call__(self, deps: ToolDependencies, query: str | None = None, **_kwargs: Any) -> Dict[str, Any]:
+        """Read only local library metadata; no provider or playback side effects."""
+        # All filesystem work stays in the worker thread, off the voice event loop.
+        return await asyncio.to_thread(_search_saved_songs, query)
+
+
+def _search_saved_songs(query: str | None) -> Dict[str, Any]:
+    from dj_reachy_remix.gradio_dj_ui import DJReachyUI
+
+    # Same title resolution as the control panel, including legacy metadata.json.
+    rows = DJReachyUI()._list_songs()
+    needle = " ".join(query.split()).casefold() if isinstance(query, str) else ""
+    matches = []
+    for filename, title, _size in rows:
+        try:
+            saved_at = resolve_saved_song(filename).lstat().st_mtime
+        except (OSError, ValueError):
+            continue
+        title = " ".join(title.split())
+        if needle and needle not in title.casefold() and needle not in filename.casefold():
+            continue
+        if len(title) > LIST_SAVED_TITLE_CHARS:
+            title = title[: LIST_SAVED_TITLE_CHARS - 1].rstrip() + "\u2026"
+        matches.append((saved_at, {"filename": filename, "title": title}))
+    # Newest first by save time; the panel's filename order may differ.
+    matches.sort(key=lambda match: match[0], reverse=True)
+    songs = [song for _, song in matches[:LIST_SAVED_SONGS_LIMIT]]
+    logger.info("Listed %d of %d saved tracks for voice (query=%s)", len(songs), len(matches), bool(needle))
+    result: Dict[str, Any] = {"count": len(matches), "songs": songs}
+    if len(matches) > len(songs):
+        result["more"] = "Only the newest matches are listed; search with a more specific query for older tracks."
+    return result
+
+
 class PlaySavedSong(Tool):
     """Replay a validated saved MP3 through the same exclusive playback owner."""
 
     name = "play_saved_song"
-    description = "Replay one saved library track by its exact filename without regeneration."
+    description = (
+        "Replay one saved library track by its exact filename without regeneration. "
+        "Call list_saved_songs first if you don't have the exact filename."
+    )
     parameters_schema = {
         "type": "object",
         "properties": {"filename": {"type": "string"}},

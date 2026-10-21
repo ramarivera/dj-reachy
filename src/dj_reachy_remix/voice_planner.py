@@ -79,8 +79,15 @@ def app_tool_specs() -> list[dict[str, Any]]:
             },
         ),
         _spec(
+            "list_saved_songs",
+            "List saved library tracks, newest first, with exact filenames and short titles. Use it when the "
+            "user asks what songs exist or wants an earlier song. Null query lists the newest; a query searches "
+            "titles and filenames to reach older tracks. Listing never plays anything.",
+            {"query": {"type": ["string", "null"], "maxLength": 200}},
+        ),
+        _spec(
             "play_saved_song",
-            "Play an exact known saved filename without generating; ask if the filename is unknown.",
+            "Play an exact saved filename without generating. Get the filename from list_saved_songs; never guess it.",
             {
                 "filename": {"type": "string", "maxLength": 255},
             },
@@ -118,6 +125,12 @@ def validate_app_call(name: Any, arguments: Any) -> tuple[str, dict[str, Any]]:
     if name in CONTROL_TOOLS or name == "stop_dance":
         if args:
             raise ValueError("Control commands take no arguments")
+    elif name == "list_saved_songs":
+        query = args.get("query")
+        if set(args) - {"query"} or not (query is None or isinstance(query, str) and len(query) <= 200):
+            raise ValueError("Saved-track search takes only an optional short query")
+        if query is None or not query.strip():
+            args.pop("query", None)
     elif name == "make_song_and_dance":
         if set(args) - {"prompt", "music_length_ms"}:
             raise ValueError("Unsupported song arguments")

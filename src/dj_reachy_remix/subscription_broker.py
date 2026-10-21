@@ -48,7 +48,7 @@ LIVE_EXECUTION_RULES = (
     "A spoken promise does not execute an app action. Never generate another track automatically. "
     "Say that generation has started only after the client reports it actually started; before that report only preparation, waiting or submission as applicable. "
     "Handle ordinary self-contained conversation directly; it is not a new app request. "
-    "Delegate requests to play saved songs, pause, resume, stop music, dance, or answer camera questions to the client. "
+    "Delegate requests to list saved songs or play saved songs, pause, resume, stop music, dance, or answer camera questions to the client. "
     "The camera is available through the client; never claim to see its view before the image result. "
     "Song generation is asynchronous: continue conversing while it runs. "
     "Announce that the song is ready only after the explicit generation-completed notice arrives. "

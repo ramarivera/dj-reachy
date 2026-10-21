@@ -39,7 +39,7 @@ PROVIDER_CATEGORIES = {
     "response.done": "response",
     "error": "error",
 }
-SAFE_TOOLS = {"make_song_and_dance", "play_saved_song", "pause_music", "resume_music", "stop_music"}
+SAFE_TOOLS = {"make_song_and_dance", "list_saved_songs", "play_saved_song", "pause_music", "resume_music", "stop_music"}
 Lifecycle = Literal["tool", "planner", "delegation", "connection"]
 Phase = Literal["started", "completed", "failed", "cancelled", "closed"]
 DropReason = Literal[

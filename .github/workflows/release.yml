@@ -1,0 +1,130 @@
+name: Release
+
+# Publishes dj-reachy-remix to PyPI with trusted publishing (GitHub OIDC, no
+# API token) when a v* tag is pushed. PyPI side: a trusted publisher for
+# owner ramarivera, repository dj-reachy, workflow release.yml, environment pypi.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build distributions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          # Release builds never restore shared caches.
+          enable-cache: false
+
+      - name: Check the tag matches the package version
+        run: |
+          version=$(uv version --short)
+          if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match pyproject version ${version}" >&2
+            exit 1
+          fi
+
+      - name: Build sdist and wheel
+        run: uv build
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish-pypi:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/project/dj-reachy-remix/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # release/v1
+        with:
+          # Reruns after a later failure must not stop on files already uploaded.
+          skip-existing: true
+
+  github-release:
+    name: Attach distributions to a GitHub release
+    needs: publish-pypi
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Fetch PyPI's canonical files
+        # Rerun builds keep PyPI's originals (skip-existing), and a rebuilt
+        # sdist isn't byte-identical, so the release always attaches the
+        # exact files PyPI serves, checked against PyPI's sha256.
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          mkdir canonical
+          for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            if curl -fsS "https://pypi.org/pypi/dj-reachy-remix/${version}/json" -o pypi.json \
+              && [ "$(jq '.urls | length' pypi.json)" -ge "$(find dist -type f | wc -l)" ]; then
+              break
+            fi
+            [ "$attempt" = 12 ] && { echo "PyPI JSON for ${version} is not complete" >&2; exit 1; }
+            sleep 10
+          done
+          for file in dist/*; do
+            name=$(basename "$file")
+            url=$(jq -r --arg n "$name" '.urls[] | select(.filename == $n) | .url' pypi.json)
+            digest=$(jq -r --arg n "$name" '.urls[] | select(.filename == $n) | .digests.sha256' pypi.json)
+            if [ -z "$url" ]; then
+              echo "PyPI has no $name for ${version}" >&2
+              exit 1
+            fi
+            curl -fsS "$url" -o "canonical/$name"
+            echo "$digest  canonical/$name" | sha256sum --check --quiet
+            echo "$digest" > "canonical/$name.sha256"
+          done
+
+      - name: Create the release, or fill in missing assets on a rerun
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mapfile -t files < <(find canonical -type f ! -name '*.sha256' | sort)
+          if ! gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" "${files[@]}" \
+              --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
+            exit 0
+          fi
+          # Never replace an asset: existing ones must match PyPI, missing ones are added.
+          mkdir existing
+          for file in "${files[@]}"; do
+            name=$(basename "$file")
+            if gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --pattern "$name" --dir existing 2>/dev/null; then
+              echo "$(cat "$file.sha256")  existing/$name" | sha256sum --check --quiet
+            else
+              gh release upload "$GITHUB_REF_NAME" "$file" --repo "$GITHUB_REPOSITORY"
+            fi
+          done

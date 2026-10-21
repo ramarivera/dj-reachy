@@ -95,6 +95,10 @@ ruff check src/dj_reachy_remix/runtime_settings.py src/dj_reachy_remix/config.py
 mypy src/dj_reachy_remix/runtime_settings.py src/dj_reachy_remix/config.py src/dj_reachy_remix/gradio_dj_ui.py src/dj_reachy_remix/console.py src/dj_reachy_remix/main.py src/dj_reachy_remix/prompts.py
 ```
 
+## Releases
+
+Pushing a `v<version>` tag that matches `pyproject.toml` runs `.github/workflows/release.yml`. It builds the sdist and wheel, publishes them to PyPI as `dj-reachy-remix` through trusted publishing (GitHub OIDC, no stored token) from the `pypi` environment, and attaches them to a GitHub release.
+
 ## License
 
 [Apache 2.0](LICENSE). Original DJ Reachy app by Max Zurkinden. Preserve the existing source attribution and any third-party notices when distributing the integrated fork.
