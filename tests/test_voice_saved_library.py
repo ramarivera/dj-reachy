@@ -115,3 +115,19 @@ def test_listing_is_traced_by_name() -> None:
     from dj_reachy_remix.audio_diagnostics import SAFE_TOOLS
 
     assert "list_saved_songs" in SAFE_TOOLS
+
+
+@pytest.mark.asyncio
+async def test_newest_first_follows_save_time_not_filename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A recent track whose filename sorts low must still lead the capped list."""
+    from dj_reachy_remix.tools.core_tools import ToolDependencies, dispatch_tool_call
+
+    monkeypatch.setattr(config, "SONGS_DIR", tmp_path)
+    for index in range(25):
+        _save_track(tmp_path, f"z{index:02d}", f"Old {index}", 1_700_000_000 + index)
+    recent = _save_track(tmp_path, "a_recent", "Brand new", 1_900_000_000)
+    deps = ToolDependencies(reachy_mini=Mock(), movement_manager=Mock())
+    result = await dispatch_tool_call("list_saved_songs", "{}", deps)
+    assert result["songs"][0]["filename"] == recent

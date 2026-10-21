@@ -1008,7 +1008,7 @@ class ListSavedSongs(Tool):
         matches = []
         for filename, title, _size in rows:
             try:
-                resolve_saved_song(filename)
+                saved_at = resolve_saved_song(filename).lstat().st_mtime
             except (OSError, ValueError):
                 continue
             title = " ".join(title.split())
@@ -1016,8 +1016,10 @@ class ListSavedSongs(Tool):
                 continue
             if len(title) > LIST_SAVED_TITLE_CHARS:
                 title = title[: LIST_SAVED_TITLE_CHARS - 1].rstrip() + "\u2026"
-            matches.append({"filename": filename, "title": title})
-        songs = matches[:LIST_SAVED_SONGS_LIMIT]
+            matches.append((saved_at, {"filename": filename, "title": title}))
+        # Newest first by save time; the panel's filename order may differ.
+        matches.sort(key=lambda match: match[0], reverse=True)
+        songs = [song for _, song in matches[:LIST_SAVED_SONGS_LIMIT]]
         logger.info("Listed %d of %d saved tracks for voice (query=%s)", len(songs), len(matches), bool(needle))
         result: Dict[str, Any] = {"count": len(matches), "songs": songs}
         if len(matches) > len(songs):

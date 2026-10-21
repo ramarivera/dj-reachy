@@ -20,9 +20,14 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          # Release builds never restore shared caches.
+          enable-cache: false
 
       - name: Check the tag matches the package version
         run: |
@@ -35,7 +40,7 @@ jobs:
       - name: Build sdist and wheel
         run: uv build
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: dist
           path: dist/
@@ -52,12 +57,12 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: dist
           path: dist/
 
-      - uses: pypa/gh-action-pypi-publish@release/v1
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # release/v1
         with:
           # Reruns after a later failure must not stop on files already uploaded.
           skip-existing: true
@@ -70,17 +75,38 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: dist
           path: dist/
 
-      - name: Create or update the release
+      - name: Create the release, or fill in missing assets on a rerun
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --clobber
-          else
+          if ! gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
+            exit 0
           fi
+          # On a rerun PyPI keeps its original files (skip-existing), and a
+          # rebuilt sdist isn't byte-identical. Treat PyPI's bytes as canonical:
+          # never replace an asset, fail if one differs, and fill gaps from PyPI.
+          version="${GITHUB_REF_NAME#v}"
+          curl -fsS "https://pypi.org/pypi/dj-reachy-remix/${version}/json" -o pypi.json
+          mkdir existing canonical
+          for file in dist/*; do
+            name=$(basename "$file")
+            url=$(jq -r --arg n "$name" '.urls[] | select(.filename == $n) | .url' pypi.json)
+            digest=$(jq -r --arg n "$name" '.urls[] | select(.filename == $n) | .digests.sha256' pypi.json)
+            if [ -z "$url" ]; then
+              echo "PyPI has no $name for $version" >&2
+              exit 1
+            fi
+            if gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --pattern "$name" --dir existing 2>/dev/null; then
+              echo "$digest  existing/$name" | sha256sum --check --quiet
+            else
+              curl -fsS "$url" -o "canonical/$name"
+              echo "$digest  canonical/$name" | sha256sum --check --quiet
+              gh release upload "$GITHUB_REF_NAME" "canonical/$name" --repo "$GITHUB_REPOSITORY"
+            fi
+          done
