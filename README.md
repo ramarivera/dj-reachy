@@ -75,7 +75,7 @@ dj-reachy-remix
 
 The app-manager entry point uses the SDK's existing settings server. The standalone CLI starts its own loopback server. `--gradio` exposes the same shared control panel inside the voice page, not a second music executor. Stop remains usable while a long generation/replay HTTP request is running.
 
-Conversation model, voice, language and user instructions apply on the next voice connection. Disconnect and reconnect browser voice after saving. In headless mode, restart the app to reconnect. Music defaults apply to subsequent generation requests. Motion settings update an already-created local dancer as well as future playback.
+Conversation model, voice, language and user instructions apply on the next voice connection. Disconnect and reconnect browser voice after saving. In headless mode, restart the app to apply them to a connected session. A session that is already offline can use Reconnect voice in the control panel instead, unless its cleanup failed. Music defaults apply to subsequent generation requests. Motion settings update an already-created local dancer as well as future playback.
 
 See [configuration and API usage](docs/configuration.md) for storage paths, versioned plan editing, billing selection and local endpoint examples.
 

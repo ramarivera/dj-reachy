@@ -54,6 +54,7 @@ DropReason = Literal[
     "feed_backlog_trimmed",
     "invalid_pcm",
     "conversion_failed",
+    "provider_audio_overflow",
 ]
 DROP_REASONS = {
     "no_connection",
@@ -67,6 +68,7 @@ DROP_REASONS = {
     "feed_backlog_trimmed",
     "invalid_pcm",
     "conversion_failed",
+    "provider_audio_overflow",
 }
 
 

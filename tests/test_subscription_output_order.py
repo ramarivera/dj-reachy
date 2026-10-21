@@ -153,3 +153,19 @@ async def test_admitted_notice_pcm_precedes_the_handlers_native_drain(
         await asyncio.gather(task, return_exceptions=True)
         await connection.close()
         app.diagnostics.close()
+
+
+@pytest.mark.asyncio
+async def test_provider_audio_overflow_is_reported_to_diagnostics() -> None:
+    """Drive the real bounded audio queue past capacity; the drop must be counted."""
+    connection = SubscriptionRealtimeAdapter().connect()
+    try:
+        capacity = connection._audio_events.maxsize
+        for _ in range(capacity + 2):
+            connection._enqueue(SimpleNamespace(
+                type="response.audio.delta", delta=base64.b64encode(b"\x00\x00" * 480).decode("ascii"),
+            ))
+        assert connection._audio_events.qsize() == capacity
+        assert connection.diagnostics.counts.get("drop.provider_audio_overflow") == 2
+    finally:
+        await connection.close()

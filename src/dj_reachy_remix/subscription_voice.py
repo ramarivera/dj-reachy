@@ -234,7 +234,6 @@ class SubscriptionRealtimeConnection:
         self._completion_events: deque[tuple[int, Any]] = deque()
         self._audio_enqueued = 0
         self._audio_consumed = 0
-        self._audio_dropped = 0
         self._available = asyncio.Event()
         self._pending: deque[str] = deque()
         self._audio_readers: list[asyncio.Task[None]] = []
@@ -266,7 +265,7 @@ class SubscriptionRealtimeConnection:
             if self._audio_events.full():
                 self._audio_events.get_nowait()
                 self._audio_consumed += 1
-                self._audio_dropped += 1
+                self.diagnostics.drop("provider_audio_overflow")
             self._audio_events.put_nowait(event)
         else:
             turn = getattr(event, "turn", None)

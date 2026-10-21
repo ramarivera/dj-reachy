@@ -33,7 +33,7 @@ Select `api_key` explicitly in the UI or with `--voice-backend api_key`. A backe
 
 Subscription broker URL and scoped token remain environment-only through `DJ_REACHY_REMIX_SUBSCRIPTION_BROKER_URL` and `DJ_REACHY_REMIX_SUBSCRIPTION_BROKER_TOKEN`. The voice implementation owns broker/credential-source setup and qualification. These values aren't settings JSON fields or public status values. The consumer ChatGPT Live contract and account access aren't established by this settings UI.
 
-The voice model, conversation voice, conversation language, and personality instructions apply on the next connection. Save, disconnect browser voice, and reconnect it at `/voice`. Headless sessions require an app restart to reconnect. This is deliberate; saving a form doesn't automatically create a billable session. The API response for saved instructions includes `reconnect_required: true`.
+The voice model, conversation voice, conversation language, and personality instructions apply on the next connection. Save, disconnect browser voice, and reconnect it at `/voice`. A connected headless session has no disconnect control, so applying these settings needs an app restart. Once a headless session is already offline, Reconnect voice in the control panel starts a new one, unless its audio or voice cleanup failed; then restart the app. This is deliberate; saving a form doesn't automatically create a billable session. The API response for saved instructions includes `reconnect_required: true`.
 
 User instructions add personality to the packaged DJ instructions; they don't replace the app's paid-generation confirmation and stop/pause policy. Conversation language and lyric language are separate. Conversation voice doesn't choose a singer.
 

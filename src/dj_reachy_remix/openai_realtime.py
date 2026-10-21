@@ -36,6 +36,8 @@ OPEN_AI_INPUT_SAMPLE_RATE: Final[Literal[24000]] = 24000
 OPEN_AI_OUTPUT_SAMPLE_RATE: Final[Literal[24000]] = 24000
 SONG_TOOLS = {"make_song_and_dance", "play_saved_song"}
 CONTROL_TOOLS = {"pause_music", "resume_music", "stop_music"}
+# Bound for the ready notice's audio to finish playing out before music starts.
+QUEUE_DRAIN_TIMEOUT_S = 15.0
 
 
 _WorkResult = TypeVar("_WorkResult")
@@ -229,7 +231,8 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
 
         Only the background song task waits here. The live receiver continues
         accepting conversation, interruption and stop commands throughout.
-        Timeout, unavailable drainage, or replaced ownership refuses playback.
+        Timeout, undrained output, or replaced ownership refuses playback. Without
+        a native playout fence, the consumed output queue is the fence.
         """
         connection, epoch = self.connection, self._work_epoch
         if connection is None or not self._current(connection, epoch):
@@ -259,13 +262,28 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
             except asyncio.TimeoutError:
                 logger.warning("Song-ready speech completion was not confirmed within its bounded wait")
                 return False
-            if self._current(connection, epoch) and self._drain_queue is not None:
-                drained = await self._drain_queue()
+            if self._current(connection, epoch):
+                try:
+                    drained = await asyncio.wait_for(
+                        (self._drain_queue or self._drain_output_queue)(), QUEUE_DRAIN_TIMEOUT_S
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("Song-ready speech did not finish playing out in time")
+                    drained = False
                 return drained is True and self._current(connection, epoch)
         finally:
             if self._music_ready_notice is notice:
                 self._music_ready_notice = None
         return False
+
+    async def _drain_output_queue(self) -> bool:
+        """Wait until queue-backed output has taken all queued announcement audio.
+
+        notify_song_ready bounds this wait.
+        """
+        while not self.output_queue.empty():
+            await asyncio.sleep(0.02)
+        return True
 
     def schedule_tool_call(self, tool_name: str, args_json: str, call_id: str) -> asyncio.Task[None]:
         """Run API Realtime function calls independently and dedupe completed IDs."""
