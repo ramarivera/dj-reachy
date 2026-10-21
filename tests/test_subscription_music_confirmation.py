@@ -1154,7 +1154,12 @@ async def test_skip_confirmation_is_dropped_when_newer_speech_arrives_during_a_s
     request = ORIGINAL + " Just make it, no confirmation."
     wire.normal_args = {**CANDIDATE, "skip_confirmation": True}
     release = asyncio.Event()
-    wire.app._stop_barrier = asyncio.create_task(release.wait())
+
+    async def pending_stop() -> dict[str, Any]:
+        await release.wait()
+        return {"status": "stopped"}
+
+    wire.app._stop_barrier = asyncio.create_task(pending_stop())
     await wire.user(request)
     await wire.delegate(text=request)
     for _ in range(20):

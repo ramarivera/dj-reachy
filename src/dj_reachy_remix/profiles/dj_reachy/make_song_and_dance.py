@@ -80,7 +80,9 @@ def get_dance_intensity() -> float:
 
 def apply_saved_motion() -> None:
     """Apply panel settings to the live dancer, except values a voice session overrode."""
+    global _music_dancer_style
     style, intensity = _effective_motion()
+    _music_dancer_style = style
     set_dance_intensity(intensity)
     set_dance_style(style)
 
@@ -1108,7 +1110,9 @@ class SetDanceMotion(Tool):
             _voice_motion["intensity"] = intensity
             set_dance_intensity(intensity)
             if intensity == 0 and _music_dancer is not None:
-                # Silent audio skips dancer updates, so clear the held pose now.
+                # Silent audio skips dancer updates, so clear the held pose and the
+                # smoothed state; otherwise the next loud chunk eases back from it.
+                _music_dancer._controller.reset()
                 _music_dancer._set_offsets((0.0,) * 6, (0.0, 0.0), 0.0)
         logger.info("Voice changed dance motion: %s", motion_summary())
         return {"status": "applied", "motion": motion_summary()}

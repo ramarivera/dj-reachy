@@ -92,8 +92,10 @@ async def test_voice_overrides_survive_panel_edits_and_end_with_the_session(monk
         monkeypatch.setattr(config, name, getattr(config, name, None))
     deps = ToolDependencies(reachy_mini=Mock(), movement_manager=Mock())
 
+    dancer._controller._smooth_head_pitch = 0.3
     await dispatch_tool_call("set_dance_motion", json.dumps({"style": "bounce", "level_percent": 0}), deps)
     assert offsets[-1] == ((0.0,) * 6, (0.0, 0.0), 0.0)
+    assert dancer._controller._smooth_head_pitch == 0.0
     settings = deepcopy(DEFAULT_SETTINGS)
     settings["music"]["lyrics"] = "panel edit"
     apply_runtime_settings(settings)
@@ -101,6 +103,13 @@ async def test_voice_overrides_survive_panel_edits_and_end_with_the_session(monk
 
     music.clear_voice_motion()
     assert music.motion_summary() == {"style": "groove", "intensity": 0.2, "percent_of_original": 100}
+
+    # Before any dancer exists, a panel style save still shows up in the summary.
+    monkeypatch.setattr(music, "_music_dancer", None)
+    settings["motion"]["style"] = "smooth"
+    apply_runtime_settings(settings)
+    await dispatch_tool_call("set_dance_motion", json.dumps({"level_percent": 50}), deps)
+    assert music.motion_summary()["style"] == "smooth"
     assert dancer._controller.style.head_bob_amplitude == music._dance_style("groove").head_bob_amplitude
 
 
