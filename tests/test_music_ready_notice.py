@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 from collections.abc import Awaitable
 
+import numpy as np
 import pytest
 
 from dj_reachy_remix.openai_realtime import OpenaiRealtimeHandler, voice_config
@@ -26,27 +27,63 @@ async def test_missing_voice_connection_does_not_authorize_music_handover() -> N
         app.diagnostics.close()
 
 
+async def _announce_and_finish(app: OpenaiRealtimeHandler, connection: SimpleNamespace) -> asyncio.Task[bool]:
+    task = asyncio.create_task(app.notify_song_ready())
+    for _ in range(50):
+        if connection.send_context.await_count:
+            break
+        await asyncio.sleep(0)
+    assert connection.send_context.await_count == 1
+    await app._handle_event(SimpleNamespace(
+        type="turn.done", turn={"role": "assistant", "transcript": "Your song is ready."},
+    ))
+    return task
+
+
 @pytest.mark.asyncio
-async def test_missing_native_drain_does_not_authorize_music_handover(
+async def test_queue_backed_output_drains_before_music_handover(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A speech final is insufficient when no native playout fence is installed."""
+    """Browser/non-native voice has no native fence; its consumed queue is the fence.
+
+    Regression for the PR #8 review: refusing here meant generated songs never
+    played in browser voice or on non-native LocalStream backends.
+    """
     monkeypatch.setattr(voice_config, "VOICE_BACKEND", "subscription")
     app = OpenaiRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
     connection = SimpleNamespace(send_context=AsyncMock())
     app.connection = connection
-    task = asyncio.create_task(app.notify_song_ready())
+    app.output_queue.put_nowait((24000, np.zeros(480, dtype=np.int16)))
+    task = await _announce_and_finish(app, connection)
     try:
-        for _ in range(50):
-            if connection.send_context.await_count:
-                break
-            await asyncio.sleep(0)
-        assert connection.send_context.await_count == 1
-        await app._handle_event(SimpleNamespace(
-            type="turn.done", turn={"role": "assistant", "transcript": "Your song is ready."},
-        ))
-        assert await asyncio.wait_for(task, 1) is False
+        await asyncio.sleep(0.05)
+        assert not task.done(), "handover must wait for queued announcement audio"
+        while not app.output_queue.empty():  # the consumer takes audio and transcript items
+            app.output_queue.get_nowait()
+        assert await asyncio.wait_for(task, 1) is True
         assert app._music_ready_notice is None
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        app.diagnostics.close()
+
+
+@pytest.mark.asyncio
+async def test_undrained_queue_output_still_refuses_music_handover(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A consumer that never takes the announcement audio is not a playout fence."""
+    import dj_reachy_remix.openai_realtime as realtime
+
+    monkeypatch.setattr(voice_config, "VOICE_BACKEND", "subscription")
+    monkeypatch.setattr(realtime, "QUEUE_DRAIN_TIMEOUT_S", 0.05)
+    app = OpenaiRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
+    connection = SimpleNamespace(send_context=AsyncMock())
+    app.connection = connection
+    app.output_queue.put_nowait((24000, np.zeros(480, dtype=np.int16)))
+    task = await _announce_and_finish(app, connection)
+    try:
+        assert await asyncio.wait_for(task, 1) is False
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)

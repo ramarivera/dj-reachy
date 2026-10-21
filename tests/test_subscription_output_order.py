@@ -153,3 +153,10 @@ async def test_admitted_notice_pcm_precedes_the_handlers_native_drain(
         await asyncio.gather(task, return_exceptions=True)
         await connection.close()
         app.diagnostics.close()
+
+
+def test_provider_audio_overflow_is_reported_to_diagnostics() -> None:
+    """Dropped provider audio was a silent counter (PR #8 review); count it by reason."""
+    from dj_reachy_remix.audio_diagnostics import DROP_REASONS
+
+    assert "provider_audio_overflow" in DROP_REASONS

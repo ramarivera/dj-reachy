@@ -146,6 +146,7 @@ class LocalStream:
         self._output_changed = asyncio.Event()
         self._flushed_epoch = 0
         self._flush_task: asyncio.Task[None] | None = None
+        self._http_tasks: set[asyncio.Task[dict[str, Any]]] = set()
         self._emit_task: asyncio.Task[tuple[int, NDArray[np.int16]] | AdditionalOutputs | None] | None = None
         self._capture_io = _AudioIO("native-audio-capture")
         self._playback_io = _AudioIO("native-audio-playback")
@@ -209,10 +210,33 @@ class LocalStream:
         loop = self._asyncio_loop
         if loop is None or not loop.is_running() or self._closing:
             raise RuntimeError("Audio session is not running. Connect voice before playback.")
-        future = asyncio.run_coroutine_threadsafe(
-            dispatch_tool_call(tool, json.dumps(arguments), self.handler.deps), loop
-        )
+        async def owned() -> dict[str, Any]:
+            # Track control-panel work so session cleanup can stop its playback.
+            task = asyncio.current_task()
+            assert task is not None
+            self._http_tasks.add(task)
+            try:
+                return await dispatch_tool_call(tool, json.dumps(arguments), self.handler.deps)
+            finally:
+                self._http_tasks.discard(task)
+
+        future = asyncio.run_coroutine_threadsafe(owned(), loop)
         return await asyncio.wrap_future(future)
+
+    async def _stop_http_work(self) -> None:
+        """Cancel control-panel tools and stop any playback they left running."""
+        from dj_reachy_remix.tools.core_tools import dispatch_tool_call
+
+        tasks = [task for task in self._http_tasks if not task.done()]
+        if not tasks:
+            return
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        try:
+            await dispatch_tool_call("stop_music", "{}", self.handler.deps)
+        except Exception:
+            logger.warning("Local session failed: music_shutdown")
 
     def launch(self) -> None:
         """Run the explicitly selected voice backend, with no key-download fallback."""
@@ -272,6 +296,7 @@ class LocalStream:
                         self._playback_interrupt.set()
                         self._play_epoch += 1
                         self._output_changed.set()
+                        await self._stop_http_work()
                         for task in self._tasks:
                             task.cancel()
                         await asyncio.gather(*self._tasks, return_exceptions=True)
@@ -295,6 +320,8 @@ class LocalStream:
                         self._native_idle = False
                         self._output_changed = asyncio.Event()
                         self._flushed_epoch = self._play_epoch
+                        # Its cancellation is finished; the next session must not await it.
+                        self._flush_task = None
                     self._voice_state = "offline"
                     if self._stop_event.is_set():
                         break

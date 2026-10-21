@@ -394,3 +394,107 @@ def test_failure_discards_native_filter_state_before_explicit_reconnect(offline_
     assert fixture.stream._playback_clock == 0.0
     assert fixture.stream._play_epoch > 0
     assert fixture.handler.output_queue.empty()
+
+
+def test_status_schema_is_stable_without_a_voice_stream(tmp_path: Path) -> None:
+    """Settings-only mode must still report reconnect availability (PR #8 review)."""
+    from dj_reachy_remix.runtime_settings import register_runtime_settings_routes
+
+    app = FastAPI()
+    register_runtime_settings_routes(app, tmp_path / "settings.json")
+    with TestClient(app) as client:
+        state = client.get("/api/dj-reachy-remix/status").json()
+    assert state["voice_state"] == "not_connected"
+    assert state["voice_reconnect_available"] is False
+
+
+def test_cancelled_flush_does_not_cross_an_explicit_reconnect(
+    offline_stream: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A flush cancelled by session cleanup must not cancel the next session's audio."""
+    fixture = offline_stream
+    fail = threading.Event()
+
+    class Connection:
+        def __aiter__(self) -> Connection:
+            return self
+
+        async def __anext__(self) -> NoReturn:
+            while not fail.is_set():
+                await asyncio.sleep(0.005)
+            raise ConnectionError(SECRET)
+
+    @asynccontextmanager
+    async def connect(**kwargs: object) -> AsyncIterator[object]:
+        yield Connection()
+
+    monkeypatch.setattr(fixture.handler, "_create_client", lambda key: setattr(
+        fixture.handler, "client", SimpleNamespace(realtime=SimpleNamespace(connect=connect))))
+    fixture.worker.start()
+    wait_until(lambda: fixture.stream.voice_status()["voice_state"] == "connected")
+
+    async def start_flush() -> None:
+        fixture.stream._flush_task = asyncio.create_task(asyncio.sleep(30), name="native-audio-flush")
+
+    loop = fixture.stream._asyncio_loop
+    asyncio.run_coroutine_threadsafe(start_flush(), loop).result(2)
+    fail.set()
+    wait_until(lambda: fixture.stream.voice_status()["voice_state"] == "offline")
+    assert fixture.stream._flush_task is None, "cancelled flush leaked into the next session"
+
+
+def test_session_failure_stops_http_owned_playback(
+    offline_stream: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Music started from the control panel must stop before the offline wait (PR #8 review)."""
+    import dj_reachy_remix.tools.core_tools as core_tools
+
+    fixture = offline_stream
+    fail = threading.Event()
+    playing = threading.Event()
+    cancelled = threading.Event()
+    stopped: list[str] = []
+
+    class Connection:
+        def __aiter__(self) -> Connection:
+            return self
+
+        async def __anext__(self) -> NoReturn:
+            while not fail.is_set():
+                await asyncio.sleep(0.005)
+            raise ConnectionError(SECRET)
+
+    @asynccontextmanager
+    async def connect(**kwargs: object) -> AsyncIterator[object]:
+        yield Connection()
+
+    async def dispatch(tool: str, args_json: str, deps: object) -> dict[str, object]:
+        if tool == "stop_music":
+            stopped.append(tool)
+            return {"status": "stopped"}
+        playing.set()
+        try:
+            await asyncio.Future[None]()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        return {}
+
+    monkeypatch.setattr(fixture.handler, "_create_client", lambda key: setattr(
+        fixture.handler, "client", SimpleNamespace(realtime=SimpleNamespace(connect=connect))))
+    monkeypatch.setattr(core_tools, "dispatch_tool_call", dispatch)
+    fixture.worker.start()
+    wait_until(lambda: fixture.stream.voice_status()["voice_state"] == "connected")
+    http_loop = asyncio.new_event_loop()
+    try:
+        invocation = http_loop.create_task(fixture.stream.invoke("play_saved_song", {"filename": "fixture.mp3"}))
+        http_loop.run_until_complete(asyncio.sleep(0))
+        wait_until(playing.is_set)
+        fail.set()
+        wait_until(lambda: fixture.stream.voice_status()["voice_state"] == "offline")
+        assert cancelled.is_set(), "HTTP-owned playback survived the session failure"
+        assert stopped == ["stop_music"]
+        with pytest.raises(asyncio.CancelledError):
+            http_loop.run_until_complete(asyncio.wait_for(invocation, 2))
+    finally:
+        http_loop.close()
