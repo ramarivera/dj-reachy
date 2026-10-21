@@ -4,5 +4,6 @@ make_song_and_dance
 pause_music
 resume_music
 stop_music
+list_saved_songs
 play_saved_song
 camera

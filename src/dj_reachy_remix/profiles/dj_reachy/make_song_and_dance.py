@@ -12,6 +12,7 @@ import threading
 from uuid import uuid4
 from typing import Any, Dict, Optional, cast
 from pathlib import Path
+from datetime import datetime, timezone
 from collections.abc import Callable, Awaitable
 
 import httpx
@@ -477,6 +478,9 @@ def _compose_music_to_mp3(
     """Compose synchronously for callers outside an event loop."""
     return asyncio.run(_compose_music(prompt, timeout_s, deps, **options))
 
+
+LIST_SAVED_SONGS_LIMIT = 20
+LIST_SAVED_TITLE_CHARS = 160
 
 OPEN_AI_OUTPUT_SAMPLE_RATE = 24000  # must match openai_realtime.py
 
@@ -963,11 +967,38 @@ def delete_saved_song(filename: str) -> bool:
     return True
 
 
+class ListSavedSongs(Tool):
+    """Let voice sessions discover the library instead of guessing filenames."""
+
+    name = "list_saved_songs"
+    description = (
+        "List the newest saved library tracks with their exact filenames and short titles. "
+        "Use before play_saved_song when the filename isn't already known from this tool."
+    )
+    parameters_schema = {"type": "object", "properties": {}, "additionalProperties": False}
+
+    async def __call__(self, deps: ToolDependencies, **_kwargs: Any) -> Dict[str, Any]:
+        """Read only local library metadata; no provider or playback side effects."""
+        rows = await asyncio.to_thread(list_saved_songs)
+        songs = []
+        for row in rows[:LIST_SAVED_SONGS_LIMIT]:
+            title = " ".join(str(row["title"]).split())
+            if len(title) > LIST_SAVED_TITLE_CHARS:
+                title = title[: LIST_SAVED_TITLE_CHARS - 1].rstrip() + "\u2026"
+            created = datetime.fromtimestamp(row["created_at_ms"] / 1000, timezone.utc)
+            songs.append({"filename": row["filename"], "title": title, "created_at": created.isoformat(timespec="minutes")})
+        logger.info("Listed %d of %d saved tracks for voice", len(songs), len(rows))
+        return {"count": len(rows), "songs": songs}
+
+
 class PlaySavedSong(Tool):
     """Replay a validated saved MP3 through the same exclusive playback owner."""
 
     name = "play_saved_song"
-    description = "Replay one saved library track by its exact filename without regeneration."
+    description = (
+        "Replay one saved library track by its exact filename without regeneration. "
+        "Call list_saved_songs first if you don't have the exact filename."
+    )
     parameters_schema = {
         "type": "object",
         "properties": {"filename": {"type": "string"}},
