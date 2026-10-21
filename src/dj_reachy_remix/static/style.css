@@ -63,8 +63,9 @@ a { color: var(--amber); text-underline-offset: 4px; }
 
 /* Masthead */
 .masthead, main, .footer { max-width: 1240px; margin: 0 auto; padding-left: 28px; padding-right: 28px; }
+/* Two fixed columns: a reconnect button appearing never wraps the side under the brand. */
 .masthead {
-  display: flex; justify-content: space-between; align-items: center; gap: 20px 32px; flex-wrap: wrap;
+  display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 20px 32px;
   padding-top: 28px; padding-bottom: 20px;
 }
 .brand { display: flex; align-items: center; gap: 14px; }
@@ -79,16 +80,17 @@ h1 {
   font-size: clamp(1.9rem, 1.4rem + 1.6vw, 2.7rem); line-height: 1; letter-spacing: -.01em;
 }
 .tagline { color: var(--haze); font-size: .9375rem; margin-top: 6px; }
-.masthead-side { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; justify-content: flex-end; }
-.masthead-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.masthead-side { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; justify-content: flex-end; min-width: 0; }
+.masthead-actions { display: flex; gap: 10px; flex-wrap: wrap; order: -1; } /* opens left of the pill, which stays put */
 
+/* A fixed width and two reserved lines: status text changes never resize the pill. */
 .voice-pill {
-  display: flex; align-items: center; gap: 10px; max-width: 460px;
+  display: flex; align-items: center; gap: 10px; flex: 0 1 440px; min-width: 0;
   padding: 8px 14px 8px 12px; border-radius: 999px; border: 1px solid var(--line);
   background: rgba(35, 28, 64, .75); font-size: .875rem; color: var(--haze);
   transition: border-color .3s var(--ease), color .3s var(--ease);
 }
-.voice-pill p { line-height: 1.35; }
+.voice-pill p { display: flex; align-items: center; min-height: 2.7em; line-height: 1.35; }
 .led {
   width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0;
   background: var(--dim); box-shadow: 0 0 0 3px rgba(154, 144, 187, .18);
@@ -173,13 +175,19 @@ main { padding-bottom: 40px; }
 .eq i:nth-child(14) { --n: 13; --rest: .18; --d: .7s; }
 .eq i:nth-child(15) { --n: 14; --rest: .24; --d: .5s; }
 .eq i:nth-child(16) { --n: 15; --rest: .14; --d: .64s; }
+/* The wake-up above plays once on load; coming back to idle after a track settles in place. */
+.deck.has-played .eq i { animation: none; }
 .deck-readout { min-width: 0; }
 .deck-state {
   font-family: var(--display); font-stretch: condensed; font-weight: 800; line-height: 1;
   font-size: clamp(2rem, 1.5rem + 1.8vw, 3.05rem); letter-spacing: -.01em; color: var(--paper);
   transition: color .35s var(--ease);
 }
-.deck-detail { margin-top: 8px; color: var(--haze); font-size: .9375rem; max-width: 60ch; }
+/* Two reserved lines keep the deck one height across states; long song titles clamp at three. */
+.deck-detail {
+  margin-top: 8px; color: var(--haze); font-size: .9375rem; max-width: 60ch; min-height: 3em;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden;
+}
 .deck-note { grid-area: note; color: var(--dim); font-size: .8125rem; }
 .transport { grid-area: transport; display: flex; gap: 10px; }
 .pad {
@@ -349,7 +357,7 @@ input[type=range]:focus-visible { outline-offset: 4px; }
 }
 .track:first-child { border-top: 0; }
 .track h3 {
-  grid-area: title; display: flex; align-items: center; gap: 8px; font-size: 1rem; font-weight: 650; overflow-wrap: anywhere;
+  grid-area: title; display: flex; align-items: baseline; gap: 8px; font-size: 1rem; font-weight: 650; overflow-wrap: anywhere;
 }
 .track h3::before {
   content: ""; width: 14px; height: 12px; flex-shrink: 0; border-radius: 1px; opacity: .7;
@@ -365,42 +373,58 @@ input[type=range]:focus-visible { outline-offset: 4px; }
     linear-gradient(var(--teal), var(--teal)) 100% 100% / 3px 65% no-repeat;
   animation: mini-eq .8s steps(4) infinite;
 }
-.track-meta { grid-area: meta; color: var(--dim); font-size: .8125rem; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+/* One line, so every row (and its skeleton) has the same height; the title attribute has the rest. */
+.track-meta {
+  grid-area: meta; color: var(--dim); font-size: .8125rem; font-variant-numeric: tabular-nums;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 .track .actions { grid-area: actions; margin: 0; gap: 8px; justify-content: flex-end; }
+/* The title's mini equalizer already shows the row is playing; a spinner would only widen the button. */
+.track.is-playing .is-busy::after { display: none; }
 .track audio { grid-area: audio; display: block; width: 100%; height: 36px; margin-top: 10px; border-radius: 10px; }
-.track.is-new { animation: track-in .45s var(--ease) both; }
-.track.is-leaving { animation: track-out .38s var(--ease) forwards; pointer-events: none; }
+.track.is-new { overflow: hidden; animation: track-in .5s var(--ease) both; }
+.track.is-leaving { overflow: hidden; animation: track-out .45s var(--ease) forwards; pointer-events: none; }
 .empty {
   margin-top: 12px; padding: 18px; border-radius: 12px; border: 1px dashed var(--line); color: var(--haze);
-  font-size: .9375rem; animation: fade-in .4s var(--ease) both;
+  font-size: .9375rem; overflow: hidden; animation: notice-in .45s var(--ease) both;
 }
-.track-skeleton { display: grid; gap: 8px; padding: 16px 0; border-top: 1px solid var(--line-soft); }
+.empty.is-error { color: var(--paper); border-color: rgba(255, 128, 128, .45); }
+/* Same grid, gaps and line boxes as .track, so real rows replace skeletons without a jump. */
+.track-skeleton {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "title actions" "meta actions" "audio audio";
+  gap: 2px 12px; align-items: center; padding: 14px 0; border-top: 1px solid var(--line-soft);
+}
 .track-skeleton:first-child { border-top: 0; }
 .track-skeleton i, .is-loading .channel :is(input:not([type=checkbox]):not([type=range]), select, textarea) {
   background: linear-gradient(90deg, #211a3d 0%, #2e2654 40%, #211a3d 80%) 0 0 / 300% 100%;
   animation: shimmer 1.4s linear infinite;
 }
 .track-skeleton i { display: block; height: 12px; border-radius: 6px; }
-.track-skeleton i:nth-child(1) { width: 55%; height: 14px; }
-.track-skeleton i:nth-child(2) { width: 35%; }
-.track-skeleton i:nth-child(3) { width: 100%; height: 32px; border-radius: 10px; margin-top: 4px; }
+.track-skeleton i:nth-child(1) { grid-area: title; width: 55%; height: 14px; margin: 5px 0; }
+.track-skeleton i:nth-child(2) { grid-area: meta; width: 70%; height: 11px; margin: 4px 0 4.5px; }
+.track-skeleton i:nth-child(3) { grid-area: actions; width: 150px; height: 38px; border-radius: 10px; }
+.track-skeleton i:nth-child(4) { grid-area: audio; height: 36px; margin-top: 10px; border-radius: 10px; }
 .is-loading .channel :is(input:not([type=checkbox]):not([type=range]), select, textarea) {
   color: transparent; border-color: transparent; pointer-events: none;
 }
 .is-loading .channel ::placeholder { color: transparent; }
 .is-loading .channel :is(input[type=range], .fader-scale, .fader-value) { opacity: .3; }
 
-/* Toasts */
+/* Toasts. Spacing is each toast's margin, not a flex gap, so it grows and collapses with the toast. */
 .toasts {
-  position: fixed; right: 20px; bottom: 20px; z-index: 30; display: flex; flex-direction: column; gap: 10px;
+  position: fixed; right: 20px; bottom: 20px; z-index: 30; display: flex; flex-direction: column;
   width: min(380px, calc(100vw - 40px)); pointer-events: none;
 }
 .toast {
+  --gap: 0px; margin-top: var(--gap);
   pointer-events: auto; cursor: pointer; padding: 12px 16px 12px 40px; border-radius: 12px; position: relative;
   background: #2a2250; border: 1px solid #4b3f85; color: var(--paper); font-size: .9rem; line-height: 1.4;
   box-shadow: 0 18px 40px -16px rgba(0, 0, 0, .9);
-  animation: toast-in .35s var(--snap) both, toast-out .45s var(--ease) 4.5s forwards;
+  animation: toast-in .5s var(--ease) both, toast-out .5s var(--ease) 4.5s forwards;
 }
+.toast + .toast { --gap: 10px; }
+.toast.is-measuring { animation: none; }
+.toast.is-repeat { animation: toast-pulse .45s var(--ease), toast-out .5s var(--ease) 4.5s forwards; }
 .toast::before {
   content: ""; position: absolute; left: 15px; top: 16px; width: 12px; height: 12px; border-radius: 50%;
   background: var(--teal); box-shadow: 0 0 10px rgba(94, 230, 200, .6);
@@ -408,6 +432,7 @@ input[type=range]:focus-visible { outline-offset: 4px; }
 .toast.is-error { border-color: rgba(255, 128, 128, .6); background: #3a1f3f; animation-delay: 0s, 9s; }
 .toast.is-error::before { background: var(--red); box-shadow: 0 0 10px rgba(255, 128, 128, .6); }
 .toast:hover { animation-play-state: paused; }
+.toast.is-leaving, .toast.is-leaving:hover { animation: toast-out .4s var(--ease) forwards; animation-play-state: running; }
 
 .footer { padding-top: 8px; padding-bottom: 32px; color: var(--dim); font-size: .8125rem; }
 
@@ -422,15 +447,49 @@ input[type=range]:focus-visible { outline-offset: 4px; }
 @keyframes eq-bounce { from { transform: scaleY(calc(var(--rest) * .6)); } to { transform: scaleY(calc(.55 + var(--rest))); } }
 @keyframes eq-scan { 0%, 100% { transform: scaleY(.1); } 50% { transform: scaleY(.85); } }
 @keyframes mini-eq { 50% { background-size: 3px 85%, 3px 40%, 3px 100%; } }
-@keyframes track-in { from { opacity: 0; transform: translateY(-8px); background-color: rgba(171, 157, 255, .14); } }
-@keyframes track-out { to { opacity: 0; transform: translateX(24px); } }
-@keyframes toast-in { from { opacity: 0; transform: translateY(14px) scale(.96); } }
-@keyframes toast-out { to { opacity: 0; transform: translateY(8px); } }
+/* Rows and toasts open to their measured height (--h, set by main.js), then fade in;
+   on the way out they fade first, then close. */
+@keyframes track-in {
+  0% { height: 0; padding-top: 0; padding-bottom: 0; opacity: 0; transform: translateY(-8px); background-color: rgba(171, 157, 255, .14); }
+  40% { height: var(--h); padding-top: 14px; padding-bottom: 14px; opacity: 0; transform: translateY(-8px); background-color: rgba(171, 157, 255, .14); }
+  100% { height: var(--h); }
+}
+@keyframes track-out {
+  0% { height: var(--h); }
+  45% { height: var(--h); padding-top: 14px; padding-bottom: 14px; opacity: 0; transform: translateX(24px); }
+  100% { height: 0; padding-top: 0; padding-bottom: 0; border-top-width: 0; opacity: 0; transform: translateX(24px); }
+}
+@keyframes toast-in {
+  0% { height: 0; margin-top: 0; padding-top: 0; padding-bottom: 0; opacity: 0; transform: translateY(14px) scale(.96); }
+  45% {
+    height: var(--h); margin-top: var(--gap); padding-top: 12px; padding-bottom: 12px; opacity: 0;
+    transform: translateY(14px) scale(.96); animation-timing-function: var(--snap);
+  }
+  100% { height: var(--h); }
+}
+@keyframes toast-out {
+  0% { height: var(--h); }
+  55% { height: var(--h); margin-top: var(--gap); padding-top: 12px; padding-bottom: 12px; opacity: 0; transform: translateY(8px); }
+  100% { height: 0; margin-top: 0; padding-top: 0; padding-bottom: 0; border-width: 0; opacity: 0; transform: translateY(8px); }
+}
+@keyframes notice-in { from { max-height: 0; margin-top: 0; padding-top: 0; padding-bottom: 0; border-width: 0; opacity: 0; } to { max-height: 240px; } }
+@keyframes reveal { from { max-height: 0; min-height: 0; padding-top: 0; padding-bottom: 0; border-width: 0; opacity: 0; } to { max-height: 80px; } }
+@keyframes toast-pulse { 40% { transform: scale(1.03); border-color: var(--lilac); } }
 @keyframes toast-in-still { from { opacity: 0; } }
 @keyframes toast-out-still { to { opacity: 0; } }
 
+/* Narrow desktop and below: the pads sit under the screen so the readout keeps a readable width. */
+@media (max-width: 1220px) {
+  .deck { grid-template-columns: minmax(0, 1fr); grid-template-areas: "screen" "transport" "note"; }
+  .transport { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .pad { width: auto; min-height: 56px; flex-direction: row; border-radius: 14px; }
+}
+
 /* Tablet and phone */
 @media (max-width: 980px) {
+  .masthead { grid-template-columns: minmax(0, 1fr); }
+  .masthead-side { justify-content: flex-start; }
+  .masthead-actions { order: 0; }
   .layout { grid-template-columns: 1fr; }
   .column { display: contents; }
   #music { order: 1; } #library { order: 2; } #motion { order: 3; } #conversation { order: 4; }
@@ -438,8 +497,9 @@ input[type=range]:focus-visible { outline-offset: 4px; }
 @media (max-width: 760px) {
   .masthead, main, .footer { padding-left: 14px; padding-right: 14px; }
   .masthead { padding-top: 18px; align-items: flex-start; }
-  .masthead-side { justify-content: flex-start; width: 100%; }
-  .voice-pill { max-width: none; border-radius: 14px; }
+  .voice-pill { flex-basis: 100%; border-radius: 14px; }
+  /* Here the reconnect button opens a new row; it grows in instead of shoving the page down. */
+  .masthead-actions > :not([hidden]) { overflow: hidden; animation: reveal .4s var(--ease) both; }
   .brand-mark { width: 44px; height: 44px; }
   /* The deck stays reachable while scrolling through settings. */
   .deck {
@@ -450,10 +510,11 @@ input[type=range]:focus-visible { outline-offset: 4px; }
   .eq { height: 38px; gap: 3px; }
   .eq i { width: 4px; }
   .eq i:nth-child(n + 11) { display: none; }
-  .deck-state { font-size: 1.6rem; }
+  /* Sized so the longest state, "Composing, then playing", stays on one line beside the equalizer. */
+  .deck-state { font-size: clamp(1.15rem, 5.2vw, 1.6rem); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .deck-detail { font-size: .8125rem; margin-top: 4px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
   .deck-note { display: none; }
-  .transport { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .transport { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
   .pad { width: auto; min-height: 50px; flex-direction: row; border-radius: 12px; padding: 8px; }
   .pad svg { width: 18px; height: 18px; flex-shrink: 0; }
   .pad span { white-space: nowrap; font-size: .8125rem; }
@@ -462,7 +523,18 @@ input[type=range]:focus-visible { outline-offset: 4px; }
   .fields { grid-template-columns: 1fr; }
   .track { grid-template-columns: 1fr; grid-template-areas: "title" "meta" "actions" "audio"; }
   .track .actions { justify-content: flex-start; margin-top: 10px; }
+  .track-skeleton { grid-template-columns: 1fr; grid-template-areas: "title" "meta" "actions" "audio"; }
+  .track-skeleton i:nth-child(3) { margin-top: 10px; width: 180px; }
   .toasts { right: 12px; left: 12px; bottom: 12px; width: auto; }
+}
+/* Small phones: icons sit over the labels so three pads fit without overflowing. */
+@media (max-width: 360px) {
+  .pad { flex-direction: column; gap: 2px; padding: 6px 4px; }
+}
+
+/* The three status chips wrap to two rows here; reserve both so loading doesn't push the page. */
+@media (max-width: 600px) {
+  .connection { min-height: calc(2 * 31.5px + 8px); align-content: flex-start; }
 }
 
 /* Reduced motion: no equalizer movement, shimmer, sweeps or slides. State is
@@ -480,4 +552,5 @@ input[type=range]:focus-visible { outline-offset: 4px; }
   .deck.is-generating .deck-screen::after { background: rgba(255, 181, 71, .08); }
   .toast { animation: toast-in-still .2s linear both, toast-out-still .3s linear 4.5s forwards !important; }
   .toast.is-error { animation: toast-in-still .2s linear both, toast-out-still .3s linear 9s forwards !important; }
+  .toast.is-leaving { animation: toast-out-still .2s linear forwards !important; }
 }

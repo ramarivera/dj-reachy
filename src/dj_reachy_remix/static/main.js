@@ -9,16 +9,34 @@ let settings;
 // Feedback. #status is the screen-reader announcement; toasts are its visual
 // twin. Their CSS exit animation removes them; a timer covers browsers or
 // background tabs where animationend never fires. remove() is idempotent.
-const TOAST_FALLBACK_MS = { info: 7000, error: 12000 };
+const TOAST_FALLBACK_MS = { info: 7000, error: 12000, dismiss: 800 };
 const TOAST_LIMIT = 3;
+// Toasts and library rows grow from and collapse to their measured height
+// (--h), so their neighbours glide instead of jumping.
+function settle(item) { item.style.setProperty("--h", `${item.offsetHeight}px`); }
+function dismiss(item) {
+  if (item.classList.contains("is-leaving")) return;
+  settle(item);
+  item.classList.toggle("is-leaving", true);
+  setTimeout(() => item.remove(), TOAST_FALLBACK_MS.dismiss);
+}
 function toast(text, error) {
   const item = document.createElement("div");
   item.className = error ? "toast is-error" : "toast";
   item.textContent = text;
   item.addEventListener("animationend", (event) => { if (event.animationName.startsWith("toast-out")) item.remove(); });
-  item.addEventListener("click", () => item.remove());
+  item.addEventListener("click", () => dismiss(item));
   const stack = $("toasts");
+  // Repeating the newest message pulses it in place instead of stacking a copy.
+  const newest = stack.children[stack.children.length - 1];
+  const repeat = Boolean(newest) && newest.textContent === text && !newest.classList.contains("is-leaving")
+    && newest.classList.contains("is-error") === Boolean(error);
+  if (repeat) newest.remove();
+  // is-measuring holds the entry animation off so offsetHeight is the real height.
+  item.classList.toggle(repeat ? "is-repeat" : "is-measuring", true);
   stack.append(item);
+  settle(item);
+  item.classList.toggle("is-measuring", false);
   // Drop the oldest instead of hiding it: hidden toasts never animate out.
   while (stack.children.length > TOAST_LIMIT) stack.children[0].remove();
   setTimeout(() => item.remove(), error ? TOAST_FALLBACK_MS.error : TOAST_FALLBACK_MS.info);
@@ -28,11 +46,19 @@ function status(text, error = false) {
   $("status").classList.toggle("error", error);
   toast(text, error);
 }
+// A dropped connection or a proxy's HTML error page becomes a readable
+// message instead of "Failed to fetch" or a JSON parser error.
 async function request(path, method = "GET", body) {
-  const response = await fetch(path, { method, headers: { "Content-Type": "application/json" },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error || `Request failed, HTTP ${response.status}`);
+  let response;
+  try {
+    response = await fetch(path, { method, headers: { "Content-Type": "application/json" },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+  } catch (_) {
+    throw new Error("Can't reach the DJ Reachy app server. Check that the app is running, then try again.");
+  }
+  const data = await response.json().catch(() => null);
+  if (!response.ok) throw new Error(data?.error || `Request failed, HTTP ${response.status}. Check the local app server.`);
+  if (data === null) throw new Error("The app server sent an unreadable reply. Reload the panel and try again.");
   return data;
 }
 const resultText = {
@@ -51,10 +77,13 @@ function showResult(result) {
 const deckTitles = { idle: "Ready", generating: "Composing, then playing", playing: "Playing", paused: "Paused", stopping: "Stopping" };
 let deckOwner = 0;
 let deckView = { state: "idle", detail: "" };
+let deckPlayed = false;
 const openJobs = new Set();
 function deck(state, detail) {
   deckView = { state, detail };
-  $("deck").className = `deck is-${state}`;
+  // The equalizer's wake-up runs once at load; later returns to idle settle in place.
+  deckPlayed ||= state !== "idle";
+  $("deck").className = `deck is-${state}${deckPlayed ? " has-played" : ""}`;
   $("deck-state").textContent = deckTitles[state];
   $("deck-detail").textContent = detail;
 }
@@ -181,6 +210,7 @@ function describe(entry, song) {
   entry.song = song;
   entry.title.textContent = song.title;
   entry.meta.textContent = `${song.filename}, ${song.size}`;
+  entry.meta.title = entry.meta.textContent; // the line is truncated to keep rows one height
 }
 function trackRow(song) {
   const row = document.createElement("article"); row.className = "track";
@@ -208,13 +238,25 @@ function trackRow(song) {
   controls.append(play, remove); row.append(title, filename, controls, audio);
   return entry;
 }
+// Overlapping refreshes (startup, Refresh, delete) apply only the newest request.
+let songsRequest = 0;
 async function refreshSongs() {
-  const data = await request(songs);
+  const ticket = ++songsRequest;
+  let data;
+  try { data = await request(songs); } catch (error) {
+    if (ticket !== songsRequest) return;
+    // A failed first load swaps the skeleton for a retry hint instead of shimmering forever.
+    if (!listed) { $("songs").replaceChildren(); $("songs-error").hidden = false; }
+    throw error;
+  }
+  if (ticket !== songsRequest) return;
+  $("songs-error").hidden = true;
   const target = $("songs");
   const present = new Set(data.songs.map((song) => song.filename));
   for (const [name, entry] of rows) {
     if (present.has(name)) continue;
     rows.delete(name);
+    settle(entry.row);
     entry.row.inert = true;
     entry.row.classList.toggle("is-leaving", true);
   }
@@ -222,10 +264,7 @@ async function refreshSongs() {
   const next = data.songs.map((song) => {
     let entry = rows.get(song.filename);
     if (entry) describe(entry, song);
-    else {
-      entry = trackRow(song); rows.set(song.filename, entry); fresh.add(entry.row);
-      entry.row.classList.toggle("is-new", listed);
-    }
+    else { entry = trackRow(song); rows.set(song.filename, entry); fresh.add(entry.row); }
     return entry.row;
   });
   if (!listed) { target.replaceChildren(); target.append(...next); }
@@ -236,6 +275,9 @@ async function refreshSongs() {
       if (!fresh.has(next[i])) continue;
       if (next[i + 1]) target.insertBefore(next[i], next[i + 1]); else target.append(next[i]);
     }
+    // Measure every new row before any starts growing from zero height.
+    fresh.forEach(settle);
+    for (const row of fresh) row.classList.toggle("is-new", true);
   }
   listed = true;
   $("songs-empty").hidden = data.songs.length > 0;
@@ -335,6 +377,7 @@ $("refresh").addEventListener("click", async () => {
   finally { busy($("refresh"), false); }
 });
 (async () => {
+  let loaded = false;
   try {
     settings = await request(`${api}/settings`);
     const voice = settings.voice, music = settings.music, motion = settings.motion;
@@ -348,12 +391,17 @@ $("refresh").addEventListener("click", async () => {
     showStyle(); showIntensity();
     $("instructions").value = (await request(`${api}/instructions`)).instructions;
     mode(); deck("idle", "Generate a new track or play one from your library.");
-    $("main").classList.toggle("is-loading", false);
-    await Promise.all([refreshStatus(), refreshSongs()]);
+    loaded = true;
   } catch (error) {
-    $("main").classList.toggle("is-loading", false);
     $("connection").replaceChildren();
     $("connection").append(chip("Settings couldn't load. Check the local app server.", "error"));
     status(error.message, true);
+  }
+  $("main").classList.toggle("is-loading", false);
+  // The library doesn't depend on settings, and each failure reports itself
+  // instead of being blamed on settings.
+  const loads = loaded ? [refreshStatus(), refreshSongs()] : [refreshSongs()];
+  for (const result of await Promise.allSettled(loads)) {
+    if (result.status === "rejected") status(result.reason.message, true);
   }
 })();

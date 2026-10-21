@@ -71,7 +71,8 @@ class El {
   constructor(tag = 'div') {
     this.tag = tag; this.children = []; this.listeners = {}; this.classes = new Set();
     this.textContent = ''; this.value = ''; this.checked = false; this.disabled = false; this.hidden = false;
-    this.dataset = {}; this.parent = null;
+    this.dataset = {}; this.parent = null; this.offsetHeight = 0;
+    this.style = {setProperty() {}, removeProperty() {}};  // toast and row heights (--h)
     const self = this;
     this.classList = {
       toggle(name, force) {
