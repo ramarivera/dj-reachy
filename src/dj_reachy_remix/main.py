@@ -59,6 +59,20 @@ def mount_voice_ui(app: FastAPI, handler: OpenaiRealtimeHandler) -> Stream:
     return _mount_voice_ui(app, handler)
 
 
+# Matches static/style.css so the Gradio voice page and the embedded panel read as one app.
+_VOICE_PANEL_EMBED = """<style>
+.djr-embed{margin-top:8px}
+.djr-embed a{display:inline-flex;align-items:center;min-height:44px;padding:10px 16px;border-radius:12px;
+border:1px solid #3b3163;background:#1b1533;color:#f4efff!important;font-weight:650;text-decoration:none!important;
+transition:border-color .18s ease,background-color .18s ease}
+.djr-embed a:hover{border-color:#ffb547;background:#241c42}
+.djr-embed a:focus-visible{outline:3px solid #ffe28a;outline-offset:3px}
+.djr-embed iframe{display:block;width:100%;height:820px;margin-top:14px;border:1px solid #3b3163;
+border-radius:18px;background:#140f26}
+</style><div class="djr-embed"><a href="/" target="_blank" rel="noopener">Open music, conversation and motion controls</a>
+<iframe title="DJ Reachy Remix controls" src="/"></iframe></div>"""
+
+
 def _mount_voice_ui(app: FastAPI, handler: OpenaiRealtimeHandler) -> Stream:
     """Mount browser voice at /voice alongside the shared control panel at /."""
     from dj_reachy_remix.config import config
@@ -77,11 +91,10 @@ def _mount_voice_ui(app: FastAPI, handler: OpenaiRealtimeHandler) -> Stream:
         handler=handler, mode="send-receive", modality="audio", concurrency_limit=1,
         additional_inputs=[chatbot, openai_key, elevenlabs_key], additional_outputs=[chatbot],
         additional_outputs_handler=update_chatbot,
-        ui_args={"title": "DJ Reachy Remix voice"},
+        ui_args={"title": "DJ Reachy Remix voice", "pulse_color": "#ffb547", "icon_button_color": "#ffb547"},
     )
     with stream.ui:
-        gr.HTML('<a href="/" target="_blank" rel="noopener">Open music, conversation and motion controls</a>')
-        gr.HTML('<iframe title="DJ Reachy Remix controls" src="/" style="width:100%;height:760px;border:0"></iframe>')
+        gr.HTML(_VOICE_PANEL_EMBED)
 
     async def invoke(tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
         live = [item for item in stream.webrtc_component.handlers.values()
