@@ -42,7 +42,7 @@ LIVE_EXECUTION_RULES = (
     "Relay that preview and ask whether the user wants that exact request generated. "
     "If the user explicitly says to skip the confirmation (for example 'don't ask, just make it'), say so when delegating; "
     "the client then generates immediately without a preview. "
-    "Only the client can authorize paid generation after actual user confirmation; it must obtain explicit user confirmation before any paid music generation. "
+    "Only the client can authorize paid generation, after actual user confirmation or the user's explicit request in that turn to skip it; otherwise it must obtain explicit user confirmation before any paid music generation. "
     "The client holds a bounded pending draft and interprets actual spoken replies only while that draft awaits approval. "
     "A second Live delegation is not required for a reply to that pending draft; do not ask the user to repeat the request or use a particular approval word. "
     "Do not treat silence, your own speech or an earlier approval as current confirmation. "

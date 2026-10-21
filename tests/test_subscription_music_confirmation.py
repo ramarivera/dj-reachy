@@ -49,6 +49,7 @@ class WireHarness:
         self.revision: dict[str, Any] | None = None
         self.normal_name = "make_song_and_dance"
         self.normal_args = deepcopy(CANDIDATE)
+        self.normal_calls: list[tuple[str, dict[str, Any]]] | None = None
         self.classifying = asyncio.Event()
         self.classifier_release: asyncio.Event | None = None
         self.classifier_releases: dict[str, asyncio.Event] = {}
@@ -89,14 +90,16 @@ class WireHarness:
                     }
                 ]
             else:
+                planned = self.normal_calls or [(self.normal_name, self.normal_args)]
                 output = [
                     {
                         "type": "function_call",
-                        "call_id": "fixture-candidate",
+                        "call_id": f"fixture-candidate-{index}" if index else "fixture-candidate",
                         "namespace": "dj_reachy_remix",
-                        "name": self.normal_name,
-                        "arguments": json.dumps(self.normal_args),
+                        "name": name,
+                        "arguments": json.dumps(args),
                     }
+                    for index, (name, args) in enumerate(planned)
                 ]
             return httpx.Response(
                 200,
@@ -1130,3 +1133,34 @@ async def test_skip_confirmation_false_still_offers_a_draft(wire: WireHarness) -
     wire.normal_args = {**CANDIDATE, "skip_confirmation": False}
     await wire.prepare()
     assert wire.songs == []
+
+
+@pytest.mark.asyncio
+async def test_skip_confirmation_applies_motion_planned_after_the_song(wire: WireHarness) -> None:
+    """A song call ends the round, so other calls in the same plan run first."""
+    request = ORIGINAL + " Dance wild and don't ask me to confirm."
+    motion = {"style": "bounce", "level_percent": 125}
+    wire.normal_calls = [("make_song_and_dance", {**CANDIDATE, "skip_confirmation": True}), ("set_dance_motion", motion)]
+    await wire.user(request)
+    await wire.delegate(text=request)
+    await wire.drain()
+    assert [name for name, _ in wire.executed] == ["set_dance_motion", "make_song_and_dance"]
+    assert wire.executed[0][1] == motion
+
+
+@pytest.mark.asyncio
+async def test_skip_confirmation_is_dropped_when_newer_speech_arrives_during_a_stop(wire: WireHarness) -> None:
+    """Waiting on a prior stop must not let a superseded skip request spend credits."""
+    request = ORIGINAL + " Just make it, no confirmation."
+    wire.normal_args = {**CANDIDATE, "skip_confirmation": True}
+    release = asyncio.Event()
+    wire.app._stop_barrier = asyncio.create_task(release.wait())
+    await wire.user(request)
+    await wire.delegate(text=request)
+    for _ in range(20):
+        await asyncio.sleep(0)
+    await wire.fragment("Actually wait, something else")
+    release.set()
+    await wire.drain()
+    assert wire.songs == []
+    assert "superseded" in json.dumps(wire.messages)

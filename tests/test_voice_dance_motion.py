@@ -62,7 +62,7 @@ async def test_dispatched_motion_change_updates_the_live_dancer_only(
     result = await dispatch_tool_call("set_dance_motion", json.dumps({"style": "bounce", "level_percent": 125}), deps)
     assert result["motion"] == {"style": "bounce", "intensity": 0.25, "percent_of_original": 125}
     assert dancer._controller.style.head_bob_amplitude == music._dance_style("bounce").head_bob_amplitude
-    assert (config.MOTION_STYLE, config.MOTION_INTENSITY) == ("bounce", 0.25)
+    assert (config.MOTION_STYLE, config.MOTION_INTENSITY) == ("groove", 0.2)
     assert not settings_file.exists()
 
     calmer = await dispatch_tool_call("set_dance_motion", json.dumps({"level_percent": 50}), deps)
@@ -70,6 +70,38 @@ async def test_dispatched_motion_change_updates_the_live_dancer_only(
 
     rejected = await dispatch_tool_call("set_dance_motion", json.dumps({"level_percent": 500}), deps)
     assert "error" in rejected and dancer.intensity == 0.1
+    extra = await dispatch_tool_call("set_dance_motion", json.dumps({"style": "smooth", "speed": 3}), deps)
+    assert "speed" in extra["error"] and music.motion_summary()["style"] == "bounce"
+
+
+@pytest.mark.asyncio
+async def test_voice_overrides_survive_panel_edits_and_end_with_the_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unrelated panel saves keep the voice change; ending the session restores saved defaults."""
+    from copy import deepcopy
+
+    from dj_reachy_remix.config import config, apply_runtime_settings
+    from dj_reachy_remix.runtime_settings import DEFAULT_SETTINGS
+    from dj_reachy_remix.tools.core_tools import ToolDependencies, dispatch_tool_call
+
+    offsets: list[tuple[object, ...]] = []
+    dancer = MusicDancer(lambda *values: offsets.append(values), intensity=0.2)
+    monkeypatch.setattr(music, "_music_dancer", dancer)
+    monkeypatch.setattr(music, "_music_dancer_style", "groove")
+    monkeypatch.setattr(music, "_voice_motion", {})
+    for name in ("MOTION_STYLE", "MOTION_INTENSITY", "RUNTIME_SETTINGS", "MUSIC_LYRICS"):
+        monkeypatch.setattr(config, name, getattr(config, name, None))
+    deps = ToolDependencies(reachy_mini=Mock(), movement_manager=Mock())
+
+    await dispatch_tool_call("set_dance_motion", json.dumps({"style": "bounce", "level_percent": 0}), deps)
+    assert offsets[-1] == ((0.0,) * 6, (0.0, 0.0), 0.0)
+    settings = deepcopy(DEFAULT_SETTINGS)
+    settings["music"]["lyrics"] = "panel edit"
+    apply_runtime_settings(settings)
+    assert music.motion_summary() == {"style": "bounce", "intensity": 0.0, "percent_of_original": 0}
+
+    music.clear_voice_motion()
+    assert music.motion_summary() == {"style": "groove", "intensity": 0.2, "percent_of_original": 100}
+    assert dancer._controller.style.head_bob_amplitude == music._dance_style("groove").head_bob_amplitude
 
 
 def test_motion_tool_is_registered_traced_and_documented() -> None:

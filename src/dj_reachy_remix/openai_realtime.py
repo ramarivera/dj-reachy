@@ -1,6 +1,7 @@
 """App voice handler with independent, correlated and cancellable tool ownership."""
 
 from __future__ import annotations
+import sys
 import json
 import base64
 import asyncio
@@ -545,6 +546,8 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
                     await connection.send_context(text, "speakable", identity)
                     return
                 history.extend(output)
+                # Song calls end the round, so apply motion and other calls first.
+                calls = sorted(calls, key=lambda call: isinstance(call, dict) and call.get("name") in SONG_TOOLS)
                 for call in calls:
                     name, args = validate_app_call(call.get("name"), call.get("arguments"))
                     call_id = call.get("call_id")
@@ -576,6 +579,10 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
                             # The user explicitly waived the preview in this same turn and
                             # accepted the credit cost. The draft still froze validated options.
                             self._pending_music.clear()
+                            if self._stop_barrier is not None:
+                                await asyncio.shield(self._stop_barrier)
+                            if not self._current(connection, epoch) or context_turn_id != self._latest_user_turn:
+                                raise ValueError("Newer speech superseded that song request; no music was submitted")
                             logger.info("User skipped music confirmation; generating immediately")
                             song = await self._execute("make_song_and_dance", draft.arguments, connection, epoch)
                             if self._current(connection, epoch):
@@ -961,6 +968,9 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
 
     async def _end_session_work(self) -> None:
         active = bool(self._work_tasks or self._song_task)
+        music_module = sys.modules.get("dj_reachy_remix.profiles.dj_reachy.make_song_and_dance")
+        if music_module is not None and hasattr(music_module, "clear_voice_motion"):
+            music_module.clear_voice_motion()
         self._work_epoch += 1
         self._pending_music.clear()
         tasks = list(set(self._tool_tasks.values()) | set(self._subscription_tasks.values()) | self._work_tasks)
