@@ -80,33 +80,51 @@ jobs:
           name: dist
           path: dist/
 
-      - name: Create the release, or fill in missing assets on a rerun
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Fetch PyPI's canonical files
+        # Rerun builds keep PyPI's originals (skip-existing), and a rebuilt
+        # sdist isn't byte-identical, so the release always attaches the
+        # exact files PyPI serves, checked against PyPI's sha256.
         run: |
-          if ! gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
-            exit 0
-          fi
-          # On a rerun PyPI keeps its original files (skip-existing), and a
-          # rebuilt sdist isn't byte-identical. Treat PyPI's bytes as canonical:
-          # never replace an asset, fail if one differs, and fill gaps from PyPI.
           version="${GITHUB_REF_NAME#v}"
-          curl -fsS "https://pypi.org/pypi/dj-reachy-remix/${version}/json" -o pypi.json
-          mkdir existing canonical
+          mkdir canonical
+          for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            if curl -fsS "https://pypi.org/pypi/dj-reachy-remix/${version}/json" -o pypi.json \
+              && [ "$(jq '.urls | length' pypi.json)" -ge "$(find dist -type f | wc -l)" ]; then
+              break
+            fi
+            [ "$attempt" = 12 ] && { echo "PyPI JSON for ${version} is not complete" >&2; exit 1; }
+            sleep 10
+          done
           for file in dist/*; do
             name=$(basename "$file")
             url=$(jq -r --arg n "$name" '.urls[] | select(.filename == $n) | .url' pypi.json)
             digest=$(jq -r --arg n "$name" '.urls[] | select(.filename == $n) | .digests.sha256' pypi.json)
             if [ -z "$url" ]; then
-              echo "PyPI has no $name for $version" >&2
+              echo "PyPI has no $name for ${version}" >&2
               exit 1
             fi
+            curl -fsS "$url" -o "canonical/$name"
+            echo "$digest  canonical/$name" | sha256sum --check --quiet
+            echo "$digest" > "canonical/$name.sha256"
+          done
+
+      - name: Create the release, or fill in missing assets on a rerun
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mapfile -t files < <(find canonical -type f ! -name '*.sha256' | sort)
+          if ! gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" "${files[@]}" \
+              --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
+            exit 0
+          fi
+          # Never replace an asset: existing ones must match PyPI, missing ones are added.
+          mkdir existing
+          for file in "${files[@]}"; do
+            name=$(basename "$file")
             if gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --pattern "$name" --dir existing 2>/dev/null; then
-              echo "$digest  existing/$name" | sha256sum --check --quiet
+              echo "$(cat "$file.sha256")  existing/$name" | sha256sum --check --quiet
             else
-              curl -fsS "$url" -o "canonical/$name"
-              echo "$digest  canonical/$name" | sha256sum --check --quiet
-              gh release upload "$GITHUB_REF_NAME" "canonical/$name" --repo "$GITHUB_REPOSITORY"
+              gh release upload "$GITHUB_REF_NAME" "$file" --repo "$GITHUB_REPOSITORY"
             fi
           done
