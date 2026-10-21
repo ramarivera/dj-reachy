@@ -2,61 +2,136 @@
 <html lang="en">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark"><meta name="theme-color" content="#140f26">
   <title>DJ Reachy Remix controls</title><link rel="stylesheet" href="/static/style.css">
   <script src="/static/main.js" defer></script>
 </head>
 <body>
-<header><div><p class="eyebrow">DJ Reachy Remix</p><h1>Music and conversation</h1></div><a id="voice-link" href="/voice" target="_top" hidden>Open browser voice</a></header>
-<main>
-  <p id="connection" class="notice" role="status">Loading settings...</p>
-  <p id="voice-status" role="status" aria-live="polite">Voice status pending.</p>
-  <button id="voice-reconnect" type="button" hidden>Reconnect voice (new session)</button>
-  <div class="transport" aria-label="Music playback">
-    <button data-control="pause">Pause</button><button data-control="resume">Resume</button><button data-control="stop" class="stop">Stop music</button>
-    <span>Stops local playback. Provider generation may continue.</span>
+<a class="skip" href="#deck">Skip to playback controls</a>
+<header class="masthead">
+  <div class="brand">
+    <svg class="brand-mark" viewBox="0 0 48 48" aria-hidden="true" focusable="false">
+      <path class="antenna" d="M17 13 13 4M31 13l4-9"/>
+      <rect class="head" x="9" y="12" width="30" height="24" rx="11"/>
+      <circle class="eye" cx="19" cy="24" r="3.2"/><circle class="eye" cx="29" cy="24" r="3.2"/>
+      <path class="phones" d="M6 30v-6a18 18 0 0 1 36 0v6"/>
+      <rect class="cup" x="3" y="25" width="7" height="12" rx="3"/><rect class="cup" x="38" y="25" width="7" height="12" rx="3"/>
+    </svg>
+    <div>
+      <h1>DJ Reachy Remix</h1>
+      <p class="tagline">Music, conversation and motion for your Reachy Mini</p>
+    </div>
   </div>
-  <p id="status" role="status" aria-live="polite"></p>
+  <div class="masthead-side">
+    <div id="voice-pill" class="voice-pill is-pending">
+      <span class="led" aria-hidden="true"></span>
+      <p id="voice-status" role="status" aria-live="polite">Voice status pending.</p>
+    </div>
+    <div class="masthead-actions">
+      <button id="voice-reconnect" type="button" class="ghost" hidden>Reconnect voice (new session)</button>
+      <a id="voice-link" class="ghost-link" href="/voice" target="_top" hidden>Open browser voice</a>
+    </div>
+  </div>
+</header>
+
+<main id="main" class="is-loading">
+  <section id="deck" class="deck is-idle" aria-labelledby="deck-heading" tabindex="-1">
+    <h2 id="deck-heading" class="visually-hidden">Now playing</h2>
+    <div class="deck-screen">
+      <div class="eq" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+      <div class="deck-readout">
+        <p id="deck-state" class="deck-state">Ready</p>
+        <p id="deck-detail" class="deck-detail">Generate a new track or play one from your library.</p>
+      </div>
+    </div>
+    <div class="transport" role="group" aria-label="Music playback">
+      <button type="button" data-control="pause" class="pad"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg><span>Pause</span></button>
+      <button type="button" data-control="resume" class="pad"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M7 4.5v15a1 1 0 0 0 1.5.86l12-7.5a1 1 0 0 0 0-1.72l-12-7.5A1 1 0 0 0 7 4.5Z"/></svg><span>Resume</span></button>
+      <button type="button" data-control="stop" class="pad stop"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="5" y="5" width="14" height="14" rx="2"/></svg><span>Stop music</span></button>
+    </div>
+    <p class="deck-note">Stop ends local playback. Provider generation may continue.</p>
+    <p id="status" class="visually-hidden" role="status" aria-live="polite"></p>
+  </section>
+
+  <div id="connection" class="connection" role="status"><span class="chip is-muted">Loading settings...</span></div>
+
   <div class="layout">
-    <section aria-labelledby="conversation-heading">
-      <h2 id="conversation-heading">Conversation and persona</h2>
-      <p class="hint">Voice changes apply on the next connection. Subscription never falls back to API-key billing.</p>
-      <form id="voice-form">
-        <label for="backend">Voice backend and billing</label><select id="backend"><option value="subscription">ChatGPT subscription Live</option><option value="api_key">OpenAI API-key Realtime</option></select>
-        <div class="fields"><div><label for="voice-model">Realtime model</label><input id="voice-model" required maxlength="100"></div><div><label for="voice-name">Conversation voice</label><input id="voice-name" required maxlength="32"></div></div>
-        <label for="conversation-language">Conversation language</label><input id="conversation-language" placeholder="auto, Spanish, Japanese..." required maxlength="64">
-        <button type="submit">Save conversation settings</button>
-      </form>
-      <form id="instructions-form"><label for="instructions">User-owned personality instructions</label><textarea id="instructions" rows="6" maxlength="12000" placeholder="Add personality preferences. App safety and paid-generation confirmation remain in effect."></textarea><button type="submit">Save instructions for next connection</button></form>
-      <details><summary>Provider credentials</summary><p class="hint">Stored only in the user app home's private .env file, never in settings JSON. Saving a key doesn't select its billing backend or verify entitlement. Subscription broker configuration is environment-only.</p><form id="credential-form"><label for="credential-provider">Provider</label><select id="credential-provider"><option value="elevenlabs">ElevenLabs music</option><option value="openai">OpenAI API-key Realtime</option></select><label for="credential">API key</label><input id="credential" type="password" autocomplete="new-password" required><button type="submit">Save private key</button></form></details>
-    </section>
-    <section aria-labelledby="music-heading">
-      <h2 id="music-heading">Music generation</h2>
-      <p class="hint">Eleven Music preferences are independent of the conversation voice. No singer or persistent Vocals selection is implied.</p>
-      <form id="music-form">
-        <div class="fields"><div><label for="music-model">Eleven Music model</label><select id="music-model"><option>music_v2_5</option><option>music_v2</option><option>music_v1</option></select></div><div><label for="duration">Duration, seconds</label><input id="duration" type="number" min="3" max="600" step="0.001" required></div></div>
-        <label for="music-mode">Request type</label><select id="music-mode"><option value="prompt">Prompt</option><option value="plan">Versioned composition plan</option></select>
-        <div id="prompt-field"><label for="prompt">Song prompt</label><textarea id="prompt" rows="3" maxlength="6000" placeholder="Describe the track you want to create."></textarea></div>
-        <div id="plan-field" hidden><label for="plan">Composition plan JSON</label><textarea id="plan" rows="8" spellcheck="false" placeholder='{"chunks":[{"text":"[Instrumental]","duration_ms":10000,"positive_styles":["funk"]}]}'></textarea><p class="hint">v1 uses sections; v2 and v2.5 use chunks. The total plan duration must match the duration above. Use the provider's schema for the selected model.</p></div>
-        <label for="positive-styles">Positive styles, comma-separated</label><input id="positive-styles" placeholder="warm bass, acoustic guitar">
-        <label for="negative-styles">Excluded styles, comma-separated</label><input id="negative-styles" placeholder="distortion, heavy drums">
-        <label for="lyrics">Original lyrics</label><textarea id="lyrics" rows="4" maxlength="6000"></textarea>
-        <label for="lyric-language">Lyric language</label><input id="lyric-language" maxlength="64" placeholder="auto or a language name">
-        <label class="check"><input id="instrumental" type="checkbox"> Force instrumental, prompt mode only</label>
-        <details><summary>Qualified music options</summary><label for="output-format">Playback-compatible output format</label><select id="output-format"><option>mp3_48000_192</option><option>mp3_44100_128</option><option>mp3_44100_192</option></select><label for="finetune">Optional qualified finetune_id</label><input id="finetune" maxlength="128" placeholder="Leave blank unless your account has documented access"><p class="hint">Not a TTS voice ID. Account access and compatibility must be qualified separately. Unsupported implementations reject this option before generation.</p></details>
-        <div class="actions"><button type="submit">Save music defaults</button></div>
-        <label class="check"><input id="paid-confirmation" type="checkbox"> I confirm this new track may spend ElevenLabs credits.</label>
-        <button id="generate" type="button" class="primary" disabled>Generate and play new track</button>
-      </form>
-    </section>
-    <section aria-labelledby="motion-heading"><h2 id="motion-heading">Local motion</h2><p class="hint">Movement bounds stay in the local dance controller. Saved changes also apply to the active dancer.</p><form id="motion-form"><label for="motion-style">Dance style</label><select id="motion-style"><option>groove</option><option>bounce</option><option>smooth</option><option>classic</option></select><label for="intensity">Intensity, local range 0 to 0.25</label><input id="intensity" type="number" min="0" max="0.25" step="0.01" required><button type="submit">Save and apply motion</button></form></section>
-    <section aria-labelledby="library-heading"><div class="section-heading"><h2 id="library-heading">Saved tracks</h2><button id="refresh" type="button">Refresh</button></div><p class="hint">Replay uses the saved file without regeneration. Preview plays only in this browser when you press its play button.</p><div id="songs" aria-live="polite">Loading library...</div></section>
+    <div class="column column-main">
+      <section id="music" class="channel ch-music" aria-labelledby="music-heading">
+        <div class="channel-head"><h2 id="music-heading">Music generation</h2></div>
+        <p class="hint">Eleven Music preferences are independent of the conversation voice. No singer or persistent Vocals selection is implied.</p>
+        <form id="music-form">
+          <div class="fields"><div><label for="music-model">Eleven Music model</label><select id="music-model"><option>music_v2_5</option><option>music_v2</option><option>music_v1</option></select></div><div><label for="duration">Duration, seconds</label><input id="duration" type="number" min="3" max="600" step="0.001" required></div></div>
+          <label for="music-mode">Request type</label><select id="music-mode"><option value="prompt">Prompt</option><option value="plan">Versioned composition plan</option></select>
+          <div id="prompt-field" class="swap"><label for="prompt">Song prompt</label><textarea id="prompt" rows="3" maxlength="6000" placeholder="Describe the track you want to create."></textarea></div>
+          <div id="plan-field" class="swap" hidden><label for="plan">Composition plan JSON</label><textarea id="plan" rows="8" spellcheck="false" class="code" placeholder='{"chunks":[{"text":"[Instrumental]","duration_ms":10000,"positive_styles":["funk"]}]}'></textarea><p class="hint">v1 uses sections; v2 and v2.5 use chunks. The total plan duration must match the duration above. Use the provider's schema for the selected model.</p></div>
+          <div class="fields"><div><label for="positive-styles">Positive styles, comma-separated</label><input id="positive-styles" placeholder="warm bass, acoustic guitar"></div><div><label for="negative-styles">Excluded styles, comma-separated</label><input id="negative-styles" placeholder="distortion, heavy drums"></div></div>
+          <label for="lyrics">Original lyrics</label><textarea id="lyrics" rows="4" maxlength="6000"></textarea>
+          <label for="lyric-language">Lyric language</label><input id="lyric-language" maxlength="64" placeholder="auto or a language name">
+          <label class="check"><input id="instrumental" type="checkbox"> Force instrumental, prompt mode only</label>
+          <details><summary>Qualified music options</summary><div class="details-body"><label for="output-format">Playback-compatible output format</label><select id="output-format"><option>mp3_48000_192</option><option>mp3_44100_128</option><option>mp3_44100_192</option></select><label for="finetune">Optional qualified finetune_id</label><input id="finetune" maxlength="128" placeholder="Leave blank unless your account has documented access"><p class="hint">Not a TTS voice ID. Account access and compatibility must be qualified separately. Unsupported implementations reject this option before generation.</p></div></details>
+          <div class="actions"><button type="submit">Save music defaults</button></div>
+          <div class="generate-bay">
+            <label class="check"><input id="paid-confirmation" type="checkbox"> I confirm this new track may spend ElevenLabs credits.</label>
+            <button id="generate" type="button" class="primary" disabled>Generate and play new track</button>
+          </div>
+        </form>
+      </section>
+
+      <section id="conversation" class="channel ch-voice" aria-labelledby="conversation-heading">
+        <div class="channel-head"><h2 id="conversation-heading">Conversation and persona</h2></div>
+        <p class="hint">Voice changes apply on the next connection. Subscription never falls back to API-key billing.</p>
+        <form id="voice-form">
+          <label for="backend">Voice backend and billing</label><select id="backend"><option value="subscription">ChatGPT subscription Live</option><option value="api_key">OpenAI API-key Realtime</option></select>
+          <div class="fields"><div><label for="voice-model">Realtime model</label><input id="voice-model" required maxlength="100"></div><div><label for="voice-name">Conversation voice</label><input id="voice-name" required maxlength="32"></div></div>
+          <label for="conversation-language">Conversation language</label><input id="conversation-language" placeholder="auto, Spanish, Japanese..." required maxlength="64">
+          <button type="submit">Save conversation settings</button>
+        </form>
+        <form id="instructions-form"><label for="instructions">User-owned personality instructions</label><textarea id="instructions" rows="6" maxlength="12000" placeholder="Add personality preferences. App safety and paid-generation confirmation remain in effect."></textarea><button type="submit">Save instructions for next connection</button></form>
+        <details><summary>Provider credentials</summary><div class="details-body"><p class="hint">Stored only in the user app home's private .env file, never in settings JSON. Saving a key doesn't select its billing backend or verify entitlement. Subscription broker configuration is environment-only.</p><form id="credential-form"><label for="credential-provider">Provider</label><select id="credential-provider"><option value="elevenlabs">ElevenLabs music</option><option value="openai">OpenAI API-key Realtime</option></select><label for="credential">API key</label><input id="credential" type="password" autocomplete="new-password" required><button type="submit">Save private key</button></form></div></details>
+      </section>
+    </div>
+
+    <div class="column column-side">
+      <section id="library" class="channel ch-library" aria-labelledby="library-heading">
+        <div class="channel-head"><h2 id="library-heading">Saved tracks</h2><button id="refresh" type="button" class="ghost small">Refresh</button></div>
+        <p class="hint">Replay uses the saved file without regeneration. Preview plays only in this browser when you press its play button.</p>
+        <div id="songs" class="tracks" aria-live="polite">
+          <div class="track-skeleton" aria-hidden="true"><i></i><i></i><i></i></div>
+          <div class="track-skeleton" aria-hidden="true"><i></i><i></i><i></i></div>
+          <div class="track-skeleton" aria-hidden="true"><i></i><i></i><i></i></div>
+          <p class="visually-hidden">Loading library...</p>
+        </div>
+        <p id="songs-empty" class="empty" hidden>No saved tracks yet. Tracks you generate land here, ready to replay without spending credits.</p>
+      </section>
+
+      <section id="motion" class="channel ch-motion" aria-labelledby="motion-heading">
+        <div class="channel-head"><h2 id="motion-heading">Local motion</h2></div>
+        <p class="hint">Movement bounds stay in the local dance controller. Saved changes also apply to the active dancer.</p>
+        <form id="motion-form">
+          <label for="motion-style">Dance style</label>
+          <select id="motion-style" aria-describedby="motion-style-hint"><option value="groove">Groove, the original</option><option value="bounce">Bounce, bigger head and antennas</option><option value="classic">Classic, slightly calmer</option><option value="smooth">Smooth, about half the motion</option></select>
+          <p id="motion-style-hint" class="hint field-hint">The original DJ Reachy dance.</p>
+          <div class="fader-head"><label for="intensity">Intensity</label><output id="intensity-value" for="intensity" class="fader-value">80 of 100, the original DJ Reachy level</output></div>
+          <div class="fader">
+            <input id="intensity" type="range" min="0" max="100" step="1" value="80" list="intensity-marks" aria-describedby="intensity-value">
+            <datalist id="intensity-marks"><option value="0"></option><option value="80" label="Original"></option><option value="100"></option></datalist>
+            <div class="fader-scale" aria-hidden="true"><span>Still</span><span class="fader-mark">Original</span><span>Max</span></div>
+          </div>
+          <div class="actions"><button type="submit">Save and apply motion</button><button id="motion-reset" type="button" class="ghost">Reset to original</button></div>
+        </form>
+      </section>
+    </div>
   </div>
-</main><footer>Local controls. Provider access and robot startup are separate checks.</footer>
+</main>
+<footer class="footer">Local controls. Provider access and robot startup are separate checks.</footer>
+<div id="toasts" class="toasts" aria-hidden="true"></div>
 <script>
 window.addEventListener("DOMContentLoaded", async () => {
   const base = new URL("../", document.querySelector("script[src]").src);
   const endpoint = new URL("api/dj-reachy-remix/", base);
   const text = document.getElementById("voice-status");
+  const pill = document.getElementById("voice-pill");
   const button = document.getElementById("voice-reconnect");
   let requesting = false;
   async function refreshVoice() {
@@ -71,10 +146,12 @@ window.addEventListener("DOMContentLoaded", async () => {
         voice_shutdown: "Voice cleanup failed; restart the app before reconnecting.",
         media_shutdown: "Audio cleanup failed; restart the app before reconnecting."};
       text.textContent = `${descriptions[state.voice_state] || "Voice state unavailable."} ${errors[state.voice_error] || ""}`;
+      pill.className = `voice-pill is-${descriptions[state.voice_state] ? state.voice_state : "unknown"}${state.voice_error ? " has-error" : ""}`;
       button.hidden = !state.voice_reconnect_available;
       button.disabled = requesting;
     } catch (_) {
       text.textContent = "Voice status unavailable. Check the local app server.";
+      pill.className = "voice-pill is-unknown has-error";
       button.hidden = true;
     }
   }
