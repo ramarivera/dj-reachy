@@ -494,7 +494,7 @@ def test_session_failure_stops_http_owned_playback(
         wait_until(lambda: fixture.stream.voice_status()["voice_state"] == "offline")
         assert cancelled.is_set(), "HTTP-owned playback survived the session failure"
         assert stopped == ["stop_music"]
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(RuntimeError):
             http_loop.run_until_complete(asyncio.wait_for(invocation, 2))
     finally:
         http_loop.close()

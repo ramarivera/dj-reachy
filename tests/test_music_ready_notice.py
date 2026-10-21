@@ -232,3 +232,28 @@ async def test_interrupted_ready_drain_keeps_song_saved_without_starting_playbac
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
         app.diagnostics.close()
+
+
+@pytest.mark.asyncio
+async def test_registered_drain_is_bounded_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A playout fence that never completes refuses playback within the bound (PR #10 review)."""
+    import dj_reachy_remix.openai_realtime as realtime
+
+    monkeypatch.setattr(voice_config, "VOICE_BACKEND", "subscription")
+    monkeypatch.setattr(realtime, "QUEUE_DRAIN_TIMEOUT_S", 0.05)
+    app = OpenaiRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
+    connection = SimpleNamespace(send_context=AsyncMock())
+    app.connection = connection
+
+    async def never() -> bool:
+        await asyncio.Future[None]()
+        return True
+
+    app._drain_queue = never
+    task = await _announce_and_finish(app, connection)
+    try:
+        assert await asyncio.wait_for(task, 1) is False
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        app.diagnostics.close()

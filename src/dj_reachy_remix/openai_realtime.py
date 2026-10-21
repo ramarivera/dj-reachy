@@ -36,8 +36,8 @@ OPEN_AI_INPUT_SAMPLE_RATE: Final[Literal[24000]] = 24000
 OPEN_AI_OUTPUT_SAMPLE_RATE: Final[Literal[24000]] = 24000
 SONG_TOOLS = {"make_song_and_dance", "play_saved_song"}
 CONTROL_TOOLS = {"pause_music", "resume_music", "stop_music"}
-# Bound for queue-backed output (browser/non-native) to consume the ready notice.
-QUEUE_DRAIN_TIMEOUT_S = 10.0
+# Bound for the ready notice's audio to finish playing out before music starts.
+QUEUE_DRAIN_TIMEOUT_S = 15.0
 
 
 _WorkResult = TypeVar("_WorkResult")
@@ -263,7 +263,13 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
                 logger.warning("Song-ready speech completion was not confirmed within its bounded wait")
                 return False
             if self._current(connection, epoch):
-                drained = await (self._drain_queue or self._drain_output_queue)()
+                try:
+                    drained = await asyncio.wait_for(
+                        (self._drain_queue or self._drain_output_queue)(), QUEUE_DRAIN_TIMEOUT_S
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("Song-ready speech did not finish playing out in time")
+                    drained = False
                 return drained is True and self._current(connection, epoch)
         finally:
             if self._music_ready_notice is notice:
@@ -271,12 +277,11 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
         return False
 
     async def _drain_output_queue(self) -> bool:
-        """Wait until queue-backed output has taken all queued announcement audio."""
-        deadline = asyncio.get_running_loop().time() + QUEUE_DRAIN_TIMEOUT_S
+        """Wait until queue-backed output has taken all queued announcement audio.
+
+        notify_song_ready bounds this wait.
+        """
         while not self.output_queue.empty():
-            if asyncio.get_running_loop().time() >= deadline:
-                logger.warning("Song-ready speech was not consumed by queue-backed output in time")
-                return False
             await asyncio.sleep(0.02)
         return True
 

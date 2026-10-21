@@ -210,7 +210,14 @@ class LocalStream:
         if loop is None or not loop.is_running() or self._closing:
             raise RuntimeError("Audio session is not running. Connect voice before playback.")
         future = asyncio.run_coroutine_threadsafe(self._run_http_tool(tool, arguments, self._session_epoch), loop)
-        return await asyncio.wrap_future(future)
+        try:
+            return await asyncio.wrap_future(future)
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if future.cancelled() and not (current is not None and current.cancelling()):
+                # Session cleanup cancelled the owner-loop work, not this HTTP request.
+                raise RuntimeError("The audio session stopped; playback was stopped.") from None
+            raise
 
     async def _run_http_tool(self, tool: str, arguments: dict[str, Any], session: int) -> dict[str, Any]:
         """Run control-panel work on the owner loop, tracked so cleanup can stop it."""
