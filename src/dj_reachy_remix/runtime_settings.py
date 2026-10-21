@@ -275,7 +275,7 @@ def register_runtime_settings_routes(app: FastAPI, path: Path) -> None:
             "voice_changes": "Reconnect voice after changing conversation settings or instructions.",
             "browser_voice_available": hasattr(app.state, "dj_voice_stream"),
             **(app.state.dj_voice_status() if hasattr(app.state, "dj_voice_status") else
-               {"voice_state": "not_connected", "voice_error": None}),
+               {"voice_state": "not_connected", "voice_error": None, "voice_reconnect_available": False}),
         }
 
     @app.post("/api/dj-reachy-remix/voice/reconnect")
