@@ -1000,31 +1000,36 @@ class ListSavedSongs(Tool):
 
     async def __call__(self, deps: ToolDependencies, query: str | None = None, **_kwargs: Any) -> Dict[str, Any]:
         """Read only local library metadata; no provider or playback side effects."""
-        from dj_reachy_remix.gradio_dj_ui import DJReachyUI
+        # All filesystem work stays in the worker thread, off the voice event loop.
+        return await asyncio.to_thread(_search_saved_songs, query)
 
-        # Same title resolution as the control panel, including legacy metadata.json.
-        rows = await asyncio.to_thread(DJReachyUI()._list_songs)
-        needle = " ".join(query.split()).casefold() if isinstance(query, str) else ""
-        matches = []
-        for filename, title, _size in rows:
-            try:
-                saved_at = resolve_saved_song(filename).lstat().st_mtime
-            except (OSError, ValueError):
-                continue
-            title = " ".join(title.split())
-            if needle and needle not in title.casefold() and needle not in filename.casefold():
-                continue
-            if len(title) > LIST_SAVED_TITLE_CHARS:
-                title = title[: LIST_SAVED_TITLE_CHARS - 1].rstrip() + "\u2026"
-            matches.append((saved_at, {"filename": filename, "title": title}))
-        # Newest first by save time; the panel's filename order may differ.
-        matches.sort(key=lambda match: match[0], reverse=True)
-        songs = [song for _, song in matches[:LIST_SAVED_SONGS_LIMIT]]
-        logger.info("Listed %d of %d saved tracks for voice (query=%s)", len(songs), len(matches), bool(needle))
-        result: Dict[str, Any] = {"count": len(matches), "songs": songs}
-        if len(matches) > len(songs):
-            result["more"] = "Only the newest matches are listed; search with a more specific query for older tracks."
-        return result
+
+def _search_saved_songs(query: str | None) -> Dict[str, Any]:
+    from dj_reachy_remix.gradio_dj_ui import DJReachyUI
+
+    # Same title resolution as the control panel, including legacy metadata.json.
+    rows = DJReachyUI()._list_songs()
+    needle = " ".join(query.split()).casefold() if isinstance(query, str) else ""
+    matches = []
+    for filename, title, _size in rows:
+        try:
+            saved_at = resolve_saved_song(filename).lstat().st_mtime
+        except (OSError, ValueError):
+            continue
+        title = " ".join(title.split())
+        if needle and needle not in title.casefold() and needle not in filename.casefold():
+            continue
+        if len(title) > LIST_SAVED_TITLE_CHARS:
+            title = title[: LIST_SAVED_TITLE_CHARS - 1].rstrip() + "\u2026"
+        matches.append((saved_at, {"filename": filename, "title": title}))
+    # Newest first by save time; the panel's filename order may differ.
+    matches.sort(key=lambda match: match[0], reverse=True)
+    songs = [song for _, song in matches[:LIST_SAVED_SONGS_LIMIT]]
+    logger.info("Listed %d of %d saved tracks for voice (query=%s)", len(songs), len(matches), bool(needle))
+    result: Dict[str, Any] = {"count": len(matches), "songs": songs}
+    if len(matches) > len(songs):
+        result["more"] = "Only the newest matches are listed; search with a more specific query for older tracks."
+    return result
 
 
 class PlaySavedSong(Tool):
