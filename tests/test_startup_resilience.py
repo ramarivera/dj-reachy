@@ -498,3 +498,44 @@ def test_session_failure_stops_http_owned_playback(
             http_loop.run_until_complete(asyncio.wait_for(invocation, 2))
     finally:
         http_loop.close()
+
+
+def test_non_native_local_stream_still_fences_announcement_playout(offline_stream: SimpleNamespace) -> None:
+    """Queue emptiness is not delivery for LocalStream; its own fence must be used (PR #10 review)."""
+    fixture = offline_stream
+    assert fixture.stream._output_tail_delay == 0.0
+    assert fixture.handler._drain_queue == fixture.stream.drain_audio
+
+
+def test_http_work_scheduled_before_cleanup_never_dispatches(
+    offline_stream: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A control-panel request queued before cleanup must not start after it (PR #10 review)."""
+    import dj_reachy_remix.tools.core_tools as core_tools
+
+    fixture = offline_stream
+    dispatched: list[str] = []
+
+    async def dispatch(tool: str, args_json: str, deps: object) -> dict[str, object]:
+        dispatched.append(tool)
+        return {}
+
+    monkeypatch.setattr(core_tools, "dispatch_tool_call", dispatch)
+    fixture.worker.start()
+    wait_until(lambda: fixture.stream.voice_status()["voice_state"] == "offline")
+    loop = fixture.stream._asyncio_loop
+    stale = fixture.stream._session_epoch - 1
+    with pytest.raises(RuntimeError):
+        asyncio.run_coroutine_threadsafe(
+            fixture.stream._run_http_tool("make_song_and_dance", {"prompt": "x"}, stale), loop
+        ).result(2)
+
+    async def closing() -> None:
+        fixture.stream._closing = True
+
+    asyncio.run_coroutine_threadsafe(closing(), loop).result(2)
+    with pytest.raises(RuntimeError):
+        asyncio.run_coroutine_threadsafe(
+            fixture.stream._run_http_tool("make_song_and_dance", {"prompt": "x"}, fixture.stream._session_epoch), loop
+        ).result(2)
+    assert dispatched == []

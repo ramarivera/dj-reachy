@@ -147,11 +147,14 @@ class LocalStream:
         self._flushed_epoch = 0
         self._flush_task: asyncio.Task[None] | None = None
         self._http_tasks: set[asyncio.Task[dict[str, Any]]] = set()
+        self._session_epoch = 0
         self._emit_task: asyncio.Task[tuple[int, NDArray[np.int16]] | AdditionalOutputs | None] | None = None
         self._capture_io = _AudioIO("native-audio-capture")
         self._playback_io = _AudioIO("native-audio-playback")
         self.handler._clear_queue = self.clear_audio_queue
-        self.handler._drain_queue = self.drain_audio if self._output_tail_delay else None
+        # The fence also covers non-native output: queue emptiness isn't delivery
+        # while play_loop still holds dequeued PCM or a converter tail.
+        self.handler._drain_queue = self.drain_audio
         self._settings_app = settings_app
         # instance_path is retained in the public constructor, never a storage root.
         self._init_settings_ui_if_needed()
@@ -203,25 +206,28 @@ class LocalStream:
 
     async def invoke(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """Keep decoder/task ownership off the HTTP server's separate event loop."""
+        loop = self._asyncio_loop
+        if loop is None or not loop.is_running() or self._closing:
+            raise RuntimeError("Audio session is not running. Connect voice before playback.")
+        future = asyncio.run_coroutine_threadsafe(self._run_http_tool(tool, arguments, self._session_epoch), loop)
+        return await asyncio.wrap_future(future)
+
+    async def _run_http_tool(self, tool: str, arguments: dict[str, Any], session: int) -> dict[str, Any]:
+        """Run control-panel work on the owner loop, tracked so cleanup can stop it."""
         import json
 
         from dj_reachy_remix.tools.core_tools import dispatch_tool_call
 
-        loop = self._asyncio_loop
-        if loop is None or not loop.is_running() or self._closing:
+        # Recheck on the owner loop: cleanup may have begun after invoke() checked.
+        if self._closing or session != self._session_epoch:
             raise RuntimeError("Audio session is not running. Connect voice before playback.")
-        async def owned() -> dict[str, Any]:
-            # Track control-panel work so session cleanup can stop its playback.
-            task = asyncio.current_task()
-            assert task is not None
-            self._http_tasks.add(task)
-            try:
-                return await dispatch_tool_call(tool, json.dumps(arguments), self.handler.deps)
-            finally:
-                self._http_tasks.discard(task)
-
-        future = asyncio.run_coroutine_threadsafe(owned(), loop)
-        return await asyncio.wrap_future(future)
+        task = asyncio.current_task()
+        assert task is not None
+        self._http_tasks.add(task)
+        try:
+            return await dispatch_tool_call(tool, json.dumps(arguments), self.handler.deps)
+        finally:
+            self._http_tasks.discard(task)
 
     async def _stop_http_work(self) -> None:
         """Cancel control-panel tools and stop any playback they left running."""
@@ -249,6 +255,7 @@ class LocalStream:
             self._runner_task = asyncio.current_task()
             try:
                 while not self._stop_event.is_set():
+                    self._session_epoch += 1
                     self._closing = False
                     self._voice_state = "connecting"
                     self._voice_error = None
