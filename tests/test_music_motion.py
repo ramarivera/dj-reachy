@@ -38,3 +38,18 @@ def test_stereo_analysis_preserves_fractional_channel_mean_without_mutating_pcm(
     features = AudioAnalyzer(chunk_size=4).analyze(stereo)
     assert features.rms == expected_rms
     np.testing.assert_array_equal(stereo, before)
+
+
+def test_motion_summary_reports_the_live_preset_and_scale(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Logs must show when saved settings shrink dancing below the original level."""
+    dancer = MusicDancer(lambda *_values: None, intensity=0.2)
+    monkeypatch.setattr(music, "_music_dancer", dancer)
+    monkeypatch.setattr(music, "_music_dancer_style", "groove")
+    with caplog.at_level("INFO", logger=music.__name__):
+        music.set_dance_style("smooth")
+        music.set_dance_intensity(0.05)
+    summary = music.motion_summary()
+    assert summary == {"style": "smooth", "intensity": 0.05, "percent_of_original": 25}
+    assert "smooth" in caplog.text and "0.05" in caplog.text
