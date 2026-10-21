@@ -23,7 +23,8 @@ const requests = [];
 class Element {
   constructor() { this.value = ''; this.children = []; this.listeners = {}; this.classList = {toggle() {}}; }
   addEventListener(event, callback) { this.listeners[event] = callback; }
-  append(...children) { this.children.push(...children); }
+  append(...children) { children.forEach((child) => { child.parent = this; }); this.children.push(...children); }
+  remove() { if (this.parent) this.parent.children.splice(this.parent.children.indexOf(this), 1); this.parent = null; }
   replaceChildren() { this.children = []; }
 }
 const element = id => {

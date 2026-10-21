@@ -10,13 +10,17 @@ let settings;
 // twin. Their CSS exit animation removes them; a timer covers browsers or
 // background tabs where animationend never fires. remove() is idempotent.
 const TOAST_FALLBACK_MS = { info: 7000, error: 12000 };
+const TOAST_LIMIT = 3;
 function toast(text, error) {
   const item = document.createElement("div");
   item.className = error ? "toast is-error" : "toast";
   item.textContent = text;
   item.addEventListener("animationend", (event) => { if (event.animationName.startsWith("toast-out")) item.remove(); });
   item.addEventListener("click", () => item.remove());
-  $("toasts").append(item);
+  const stack = $("toasts");
+  stack.append(item);
+  // Drop the oldest instead of hiding it: hidden toasts never animate out.
+  while (stack.children.length > TOAST_LIMIT) stack.children[0].remove();
   setTimeout(() => item.remove(), error ? TOAST_FALLBACK_MS.error : TOAST_FALLBACK_MS.info);
 }
 function status(text, error = false) {

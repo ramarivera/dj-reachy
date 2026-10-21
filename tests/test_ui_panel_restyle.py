@@ -238,6 +238,7 @@ vm.runInContext(fs.readFileSync(process.argv[1], 'utf8'), context);
 
   // Every toast has a removal timer even if animation events never fire.
   const toastCount = element('toasts').children.length;
+  out.toastCount = toastCount;
   out.toastTimers = timers.filter((t) => t.ms >= 5000).length >= toastCount && toastCount > 0;
   timers.splice(0).forEach((t) => t.fn());
   out.toastsAfterTimers = element('toasts').children.length;
@@ -340,3 +341,9 @@ def test_toasts_are_removed_without_animation_events() -> None:
     out = run_panel()
     assert out["toastTimers"] is True
     assert out["toastsAfterTimers"] == 0
+
+
+def test_only_the_newest_three_toasts_stay_in_the_dom() -> None:
+    """Hidden toasts never animate out, so older ones reappeared later (PR #11 review)."""
+    out = run_panel()
+    assert 0 < out["toastCount"] <= 3
