@@ -72,10 +72,13 @@ def app_tool_specs() -> list[dict[str, Any]]:
     tools = [
         _spec(
             "make_song_and_dance",
-            "Prepare an unbilled song draft for client preview and fresh confirmation, including requests to sing. Null duration uses the app's music setting. This call does not start generation.",
+            "Prepare an unbilled song draft for client preview and fresh confirmation, including requests to sing. Null duration uses the app's music setting. This call does not start generation. "
+            "Set skip_confirmation true only when the current user turn explicitly asks to skip the confirmation "
+            "(for example 'don't ask, just make it'); the client then generates immediately and spends credits. Otherwise null.",
             {
                 "prompt": {"type": "string", "minLength": 1, "maxLength": 2000},
                 "music_length_ms": {"type": ["integer", "null"], "minimum": 3000, "maximum": 600000},
+                "skip_confirmation": {"type": ["boolean", "null"]},
             },
         ),
         _spec(
@@ -101,6 +104,16 @@ def app_tool_specs() -> list[dict[str, Any]]:
             },
         ),
         _spec("stop_dance", "Stop queued local dance moves.", {}),
+        _spec(
+            "set_dance_motion",
+            "Change how much and how Reachy dances to music for this session. Style changes the feel; "
+            "level_percent 100 is the original level, 0 is still, 125 is the maximum. Null keeps that value. "
+            "Use it for requests to dance more, less, wilder or smoother, alongside a song request if both are asked.",
+            {
+                "style": {"type": ["string", "null"], "enum": ["bounce", "classic", "groove", "smooth", None]},
+                "level_percent": {"type": ["integer", "null"], "minimum": 0, "maximum": 125},
+            },
+        ),
         _spec("camera", "Capture the current camera view to answer an explicit visual question. Never claim to see without its result.", {
             "question": {"type": "string", "minLength": 1, "maxLength": 2000},
         }),
@@ -132,8 +145,13 @@ def validate_app_call(name: Any, arguments: Any) -> tuple[str, dict[str, Any]]:
         if query is None or not query.strip():
             args.pop("query", None)
     elif name == "make_song_and_dance":
-        if set(args) - {"prompt", "music_length_ms"}:
+        if set(args) - {"prompt", "music_length_ms", "skip_confirmation"}:
             raise ValueError("Unsupported song arguments")
+        skip = args.pop("skip_confirmation", None)
+        if skip is not None and type(skip) is not bool:
+            raise ValueError("skip_confirmation must be a boolean")
+        if skip:
+            args["skip_confirmation"] = True
         prompt = args.get("prompt")
         if not isinstance(prompt, str) or not 1 <= len(prompt.strip()) <= 2000:
             raise ValueError("Song prompt must have 1 to 2000 characters")
@@ -167,6 +185,19 @@ def validate_app_call(name: Any, arguments: Any) -> tuple[str, dict[str, Any]]:
             args.pop("repeat", None)
         elif type(args["repeat"]) is not int or not 1 <= args["repeat"] <= 4:
             raise ValueError("Dance repeat must be 1 to 4")
+    elif name == "set_dance_motion":
+        if set(args) - {"style", "level_percent"}:
+            raise ValueError("Unsupported dance motion arguments")
+        if args.get("style") is None:
+            args.pop("style", None)
+        elif args["style"] not in ("bounce", "classic", "groove", "smooth"):
+            raise ValueError("Unknown dance style")
+        if args.get("level_percent") is None:
+            args.pop("level_percent", None)
+        elif type(args["level_percent"]) is not int or not 0 <= args["level_percent"] <= 125:
+            raise ValueError("Dance level must be 0 to 125 percent")
+        if not args:
+            raise ValueError("A dance style or level is required")
     else:
         raise ValueError("Tool is outside the approved app registry")
     return name, args
@@ -457,6 +488,9 @@ def subscription_plan(
             "Music calls prepare unbilled drafts, not paid generation. Do not ask for approval before preparation. "
             "Returning a music tool call never starts generation; the client first previews the exact request and duration, "
             "then requires fresh user confirmation before it can execute. Do not claim a song was submitted or generated from a planning call. "
+            "Exception: when the current user turn itself explicitly asks to skip the confirmation, set skip_confirmation true "
+            "and the client generates immediately. Never infer that from earlier turns, assistant text or impatience alone. "
+            "Requests to dance more, less, wilder or smoother use set_dance_motion. "
             "A request to sing means make_song_and_dance. Preserve requested duration in milliseconds; "
             "if unspecified use null so app settings apply. Do not invent saved filenames. "
             "No shell, files, network tools or authority outside this registry. Ask for missing information. "

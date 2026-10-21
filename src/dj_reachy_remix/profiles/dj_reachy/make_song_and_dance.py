@@ -37,20 +37,34 @@ _music_dancer: Optional[MusicDancer] = None
 _music_dancer_style = "groove"
 ORIGINAL_DANCE_INTENSITY = 0.2  # upstream DJ Reachy hardcoded level
 _music_dancer_deps: Optional[ToolDependencies] = None
+# Voice-session overrides from set_dance_motion. Saved panel settings stay the
+# base; overrides win until the voice session ends.
+_voice_motion: dict[str, Any] = {}
+
+
+def _saved_motion() -> tuple[str, float]:
+    from dj_reachy_remix.config import config
+
+    return str(getattr(config, "MOTION_STYLE", "groove")), float(getattr(config, "MOTION_INTENSITY", 0.2))
+
+
+def _effective_motion() -> tuple[str, float]:
+    style, intensity = _saved_motion()
+    return _voice_motion.get("style", style), _voice_motion.get("intensity", intensity)
 
 
 def _get_music_dancer(deps: ToolDependencies) -> MusicDancer:
     """Get or create the module-level MusicDancer instance."""
     global _music_dancer, _music_dancer_deps, _music_dancer_style
-    from dj_reachy_remix.config import config
 
     if _music_dancer is None or _music_dancer_deps is not deps:
+        style, intensity = _effective_motion()
         _music_dancer = MusicDancer(
             set_offsets_callback=deps.movement_manager.set_music_dance_offsets,
             sample_rate=OPEN_AI_OUTPUT_SAMPLE_RATE,
-            intensity=float(getattr(config, "MOTION_INTENSITY", 0.2)),
+            intensity=intensity,
         )
-        _music_dancer_style = str(getattr(config, "MOTION_STYLE", "groove"))
+        _music_dancer_style = style
         _music_dancer._controller.style = _dance_style(_music_dancer_style)
         _music_dancer_deps = deps
         logger.info("Created new MusicDancer instance: %s", motion_summary())
@@ -61,9 +75,25 @@ def get_dance_intensity() -> float:
     """Get current dance intensity for the UI."""
     if _music_dancer is not None:
         return _music_dancer.intensity
-    from dj_reachy_remix.config import config
+    return _effective_motion()[1]
 
-    return float(getattr(config, "MOTION_INTENSITY", 0.2))
+
+def apply_saved_motion() -> None:
+    """Apply panel settings to the live dancer, except values a voice session overrode."""
+    global _music_dancer_style
+    style, intensity = _effective_motion()
+    _music_dancer_style = style
+    set_dance_intensity(intensity)
+    set_dance_style(style)
+
+
+def clear_voice_motion() -> None:
+    """End-of-session reset: drop voice overrides and return to the saved defaults."""
+    global _music_dancer_style
+    if _voice_motion:
+        _voice_motion.clear()
+        _music_dancer_style = _saved_motion()[0]
+        apply_saved_motion()
 
 
 def set_dance_intensity(intensity: float) -> None:
@@ -1030,6 +1060,62 @@ def _search_saved_songs(query: str | None) -> Dict[str, Any]:
     if len(matches) > len(songs):
         result["more"] = "Only the newest matches are listed; search with a more specific query for older tracks."
     return result
+
+
+DANCE_STYLES = ("groove", "bounce", "smooth", "classic")
+MAX_DANCE_LEVEL_PERCENT = 125
+
+
+class SetDanceMotion(Tool):
+    """Let a voice session steer the local dancer the way it steers songs."""
+
+    name = "set_dance_motion"
+    description = (
+        "Change how Reachy dances to music for the rest of this session: style groove, bounce, smooth or "
+        "classic, and/or level_percent from 0 (still) to 125, where 100 is the original DJ Reachy level. "
+        "Use it when the user asks to dance more, less, wilder or smoother. Applies to playing and later songs; "
+        "the control panel's saved defaults are unchanged and return when the voice session ends."
+    )
+    parameters_schema = {
+        "type": "object",
+        "properties": {
+            "style": {"type": ["string", "null"], "enum": [*DANCE_STYLES, None]},
+            "level_percent": {"type": ["integer", "null"], "minimum": 0, "maximum": MAX_DANCE_LEVEL_PERCENT},
+        },
+        "additionalProperties": False,
+    }
+
+    async def __call__(
+        self, deps: ToolDependencies, style: str | None = None, level_percent: int | None = None, **_kwargs: Any
+    ) -> Dict[str, Any]:
+        """Validate locally, then override this voice session's motion without persisting settings."""
+        global _music_dancer_style
+
+        if _kwargs:
+            return {"error": f"Unsupported arguments: {', '.join(sorted(_kwargs))}. Use style and/or level_percent."}
+        if style is None and level_percent is None:
+            return {"error": "Give a style and/or level_percent."}
+        if style is not None and style not in DANCE_STYLES:
+            return {"error": f"Style must be one of {', '.join(DANCE_STYLES)}."}
+        if level_percent is not None and (
+            type(level_percent) is not int or not 0 <= level_percent <= MAX_DANCE_LEVEL_PERCENT
+        ):
+            return {"error": f"level_percent must be 0 to {MAX_DANCE_LEVEL_PERCENT}."}
+        if style is not None:
+            _voice_motion["style"] = style
+            _music_dancer_style = style
+            set_dance_style(style)
+        if level_percent is not None:
+            intensity = round(ORIGINAL_DANCE_INTENSITY * level_percent / 100, 4)
+            _voice_motion["intensity"] = intensity
+            set_dance_intensity(intensity)
+            if intensity == 0 and _music_dancer is not None:
+                # Silent audio skips dancer updates, so clear the held pose and the
+                # smoothed state; otherwise the next loud chunk eases back from it.
+                _music_dancer._controller.reset()
+                _music_dancer._set_offsets((0.0,) * 6, (0.0, 0.0), 0.0)
+        logger.info("Voice changed dance motion: %s", motion_summary())
+        return {"status": "applied", "motion": motion_summary()}
 
 
 class PlaySavedSong(Tool):

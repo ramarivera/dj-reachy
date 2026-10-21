@@ -69,9 +69,9 @@ def apply_runtime_settings(settings: dict[str, dict[str, Any]]) -> None:
     # Don't import tools while config itself is initializing. Existing dancers update now;
     # dancers created later consume the same bounded config values.
     music_module = sys.modules.get("dj_reachy_remix.profiles.dj_reachy.make_song_and_dance")
-    if music_module is not None and hasattr(music_module, "set_dance_intensity"):
-        music_module.set_dance_intensity(config.MOTION_INTENSITY)
-        music_module.set_dance_style(config.MOTION_STYLE)
+    if music_module is not None and hasattr(music_module, "apply_saved_motion"):
+        # Voice-session overrides survive unrelated panel edits.
+        music_module.apply_saved_motion()
 
 
 def update_runtime_settings(updates: dict[str, Any]) -> dict[str, dict[str, Any]]:

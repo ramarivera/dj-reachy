@@ -379,7 +379,8 @@ def test_subscription_session_uses_app_owned_preparation_and_confirmation(monkey
     assert preparation in instructions
     assert instructions.index(briefing) < instructions.index(preparation)
     assert "A second Live delegation is not required for a reply to that pending draft" in instructions
-    assert "Only the client can authorize paid generation after actual user confirmation" in instructions
+    assert "Only the client can authorize paid generation, after actual user confirmation" in instructions
+    assert "otherwise it must obtain explicit user confirmation before any paid music generation" in instructions
     assert "Do not treat silence, your own speech or an earlier approval as current confirmation" in instructions
     assert "Handle ordinary self-contained conversation directly" in instructions
     assert "Never generate another track automatically." in instructions
